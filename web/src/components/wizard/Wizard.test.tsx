@@ -16,6 +16,7 @@ const base: EnginePayload = {
   camera: { connected: false, all_centroids: null, matched_centroids: null },
   location: { latitude: null, longitude: null, source: null },
   dev_mode: false, min_matches: 8, max_prob: 0.2, sample_active: null,
+  server_errors: [],
 };
 
 describe("Wizard", () => {

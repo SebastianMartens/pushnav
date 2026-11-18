@@ -89,6 +89,13 @@ export interface CameraBlock {
   matched_centroids: number[][] | null; // [[y, x], ...]
 }
 
+/** A Stellarium/LX200 server that failed to start (e.g. its port is in use). */
+export interface ServerError {
+  server: "stellarium" | "lx200";
+  port: number;
+  message: string;
+}
+
 export interface EnginePayload {
   state: EngineState;
   failures: number;
@@ -118,4 +125,6 @@ export interface EnginePayload {
   min_matches: number;
   max_prob: number;
   sample_active: string | null;
+  /** Absent from engines that predate this field. */
+  server_errors?: ServerError[];
 }
