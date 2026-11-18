@@ -4,7 +4,8 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { ServerError } from "@/lib/types";
 
 interface Props {
-  errors: ServerError[];
+  /** Absent when talking to an engine that predates this field. */
+  errors?: ServerError[];
 }
 
 /**
@@ -15,7 +16,7 @@ interface Props {
 export function ServerErrorBanner({ errors }: Props) {
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set());
   const keyOf = (e: ServerError) => `${e.server}:${e.port}:${e.message}`;
-  const visible = errors.filter((e) => !dismissed.has(keyOf(e)));
+  const visible = (errors ?? []).filter((e) => !dismissed.has(keyOf(e)));
   if (visible.length === 0) return null;
 
   return (

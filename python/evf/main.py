@@ -176,9 +176,10 @@ def main() -> None:
     # probe) and reuses the same ConfigManager for the engine, so it isn't
     # loaded twice from disk. Logging goes up before the check so a port
     # conflict lands in evf.log (engine.startup_logging() below re-runs the
-    # same setup and logs the version banner).
+    # same setup and logs the version banner). Headless gets no console
+    # handler yet: the conflict is printed to stderr exactly once below.
     config = ConfigManager()
-    setup_logging(verbose=config.verbose, console=True)
+    setup_logging(verbose=config.verbose, console=not no_window)
     _check_single_instance(config.web_port, config.path, no_window=no_window)
 
     engine = Engine(dev_mode=dev_mode, config=config)

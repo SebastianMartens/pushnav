@@ -125,5 +125,6 @@ export interface EnginePayload {
   min_matches: number;
   max_prob: number;
   sample_active: string | null;
-  server_errors: ServerError[];
+  /** Absent from engines that predate this field. */
+  server_errors?: ServerError[];
 }

@@ -28,6 +28,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from evf.engine.goto_target import GotoTarget
+from evf.network import set_listen_options
 from evf.engine.pointing import PointingState
 from evf.paths import sounds_dir
 from evf.stellarium.protocol import _GOTO_LEN, decode_goto, encode_position
@@ -113,7 +114,7 @@ class StellariumServer:
     def start(self) -> None:
         self._stop_event.clear()
         self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        set_listen_options(self._server_sock)
         try:
             self._server_sock.bind((self._host, self._port))
             self._server_sock.listen(5)

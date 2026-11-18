@@ -104,6 +104,30 @@ def test_headless_conflict_prints_stderr_and_never_opens_dialog(
     assert str(CONFIG) in capsys.readouterr().err
 
 
+def test_headless_main_has_no_console_log_handler_before_the_check(monkeypatch):
+    """Headless prints the conflict to stderr itself; a console log handler
+    would print it a second time."""
+    calls = []
+    monkeypatch.setattr(evf_main, "setup_logging", lambda **kw: calls.append(kw))
+    monkeypatch.setattr(
+        evf_main, "ConfigManager",
+        lambda: type("C", (), {"verbose": False, "web_port": 1, "path": CONFIG})(),
+    )
+
+    def stop(*a, **kw):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(evf_main, "_check_single_instance", stop)
+    monkeypatch.setattr(evf_main.sys, "argv", ["evf", "--no-window"])
+    with pytest.raises(SystemExit):
+        evf_main.main()
+    monkeypatch.setattr(evf_main.sys, "argv", ["evf"])
+    with pytest.raises(SystemExit):
+        evf_main.main()
+
+    assert [c["console"] for c in calls] == [False, True]
+
+
 def test_conflict_is_logged(monkeypatch, busy_port, caplog):
     monkeypatch.delenv("PUSHNAV_ROOT", raising=False)
     monkeypatch.setattr(evf_main.ui_notify, "show_error", lambda *a: None)

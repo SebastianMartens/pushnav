@@ -32,6 +32,7 @@ import time
 from typing import Callable
 
 from evf.engine.goto_target import GotoTarget
+from evf.network import set_listen_options
 from evf.engine.pointing import PointingState
 from evf.lx200.protocol import (
     ACK_BYTE,
@@ -117,7 +118,7 @@ class Lx200Server:
     def start(self) -> None:
         self._stop_event.clear()
         self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        set_listen_options(self._server_sock)
         try:
             self._server_sock.bind((self._host, self._port))
             self._server_sock.listen(5)

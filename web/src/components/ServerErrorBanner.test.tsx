@@ -20,6 +20,11 @@ describe("ServerErrorBanner", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("treats a missing field (older engine payload) as no errors", () => {
+    const { container } = render(<ServerErrorBanner errors={undefined} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
   it("shows one warning per failed server", () => {
     render(<ServerErrorBanner errors={[lx200, stellarium]} />);
     expect(screen.getByText(/port 4030 is in use/)).toBeInTheDocument();

@@ -21,6 +21,8 @@
 import errno
 import json
 import socket
+import sys
+import time
 
 import pytest
 
@@ -133,3 +135,49 @@ def test_message_for_other_errors_includes_reason():
     assert "port 4030" in msg
     assert "Permission denied" in msg
     assert "in use" not in msg
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows SO_REUSEADDR semantics")
+def test_windows_loopback_occupant_blocks_wildcard_bind(eng, monkeypatch):
+    """With SO_REUSEADDR, a 0.0.0.0 bind silently succeeds next to an app
+    holding 127.0.0.1:<port>. SO_EXCLUSIVEADDRUSE must make it fail."""
+    occupant = socket.socket()
+    occupant.bind(("127.0.0.1", 0))
+    occupant.listen(5)
+    port = occupant.getsockname()[1]
+    real = engine_mod.Lx200Server
+    monkeypatch.setattr(
+        engine_mod, "Lx200Server",
+        lambda *a, **kw: real(*a, **{**kw, "host": "0.0.0.0", "port": port}),
+    )
+    try:
+        eng.startup_lx200()
+    finally:
+        occupant.close()
+
+    (err,) = eng.server_errors
+    assert err["server"] == "lx200" and err["port"] == port
+    assert "in use" in err["message"]
+    assert eng._lx200 is None
+
+
+@pytest.mark.parametrize("name", ["Lx200Server", "StellariumServer"])
+def test_server_can_restart_on_same_port_after_stop_with_client(name):
+    """EXCLUSIVEADDRUSE must not break stop() followed by an immediate rebind,
+    even after a client connection left TIME_WAIT behind."""
+    from evf.engine.goto_target import GotoTarget
+    from evf.engine.pointing import PointingState
+
+    cls = getattr(engine_mod, name)
+    srv = cls(PointingState(), host="127.0.0.1", port=0, goto_target=GotoTarget())
+    srv.start()
+    port = srv.port
+    c = socket.create_connection(("127.0.0.1", port), timeout=2)
+    time.sleep(0.3)  # let the server accept it
+    c.close()
+    time.sleep(0.3)
+    srv.stop()
+
+    again = cls(PointingState(), host="127.0.0.1", port=port, goto_target=GotoTarget())
+    again.start()  # must not raise
+    again.stop()

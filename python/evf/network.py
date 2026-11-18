@@ -28,6 +28,21 @@ _PREFERRED_PREFIXES = ("wlan", "wl", "eth", "en")
 _SKIPPED_PREFIXES = ("lo", "docker", "br-", "veth", "virbr", "vnet", "tailscale")
 
 
+def set_listen_options(sock: socket.socket) -> None:
+    """Prepare a TCP server socket for bind(): fast restart, no port sharing.
+
+    POSIX: SO_REUSEADDR lets a restart rebind a port in TIME_WAIT without
+    sharing it with a live listener. Windows: SO_REUSEADDR instead lets a
+    bind succeed on a port another app already holds (e.g. 0.0.0.0 over
+    127.0.0.1) so a conflict goes unnoticed; SO_EXCLUSIVEADDRUSE makes the
+    bind fail as it should.
+    """
+    if sys.platform == "win32":
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+
 def _usable(ip: str | None) -> bool:
     # 0.0.0.0 / loopback aren't reachable from another device, and 169.254.x.x
     # is a link-local address the OS assigns when there's no DHCP.

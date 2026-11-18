@@ -56,12 +56,15 @@ def _show_windows(title: str, message: str) -> bool:
 def _run_dialog(cmd: list[str]) -> bool:
     """Run a dialog helper to completion. True if it displayed a dialog.
 
-    A non-zero exit is still a shown dialog when the tool printed nothing
-    to stderr (zenity exits 1 when the user closes the window with Esc);
-    a tool that can't reach a display complains on stderr instead.
+    Exit 0 is OK and 1 is cancel/Esc (zenity, kdialog); both mean the user
+    saw the dialog. Anything else (a signal or crash gives a negative
+    code, other codes are tool errors) counts as a failure.
     """
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    return proc.returncode == 0 or not (proc.stderr or "").strip()
+    # The AppImage's AppRun exports a bundled LD_LIBRARY_PATH that can
+    # break host binaries such as zenity.
+    env = {k: v for k, v in os.environ.items() if k != "LD_LIBRARY_PATH"}
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
+    return proc.returncode in (0, 1)
 
 
 def _show_macos(title: str, message: str) -> bool:

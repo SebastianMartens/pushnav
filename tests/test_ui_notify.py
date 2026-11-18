@@ -121,21 +121,56 @@ def test_failing_backend_falls_through_to_next_and_stderr(monkeypatch, capsys):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("DISPLAY", ":0")
     monkeypatch.setattr(ui_notify.shutil, "which", lambda n: "/usr/bin/zenity")
-    # zenity can't open the display; Qt import fails too
-    monkeypatch.setattr(
-        subprocess, "run", MagicMock(return_value=_completed(1, "cannot open display"))
-    )
+    # zenity crashes; Qt import fails too
+    monkeypatch.setattr(subprocess, "run", MagicMock(return_value=_completed(-11, "")))
     monkeypatch.setitem(sys.modules, "PyQt6", None)
 
     assert ui_notify.show_error("PushNav", "busy") is False
     assert "busy" in capsys.readouterr().err
 
 
-def test_zenity_closed_with_esc_counts_as_shown(monkeypatch, linux_with_display):
+@pytest.mark.parametrize("stderr", ["", "Gtk-WARNING: harmless noise"])
+def test_zenity_closed_with_esc_counts_as_shown(monkeypatch, linux_with_display, stderr):
+    # Exit 1 = cancel/Esc; stderr noise must not decide.
     monkeypatch.setattr(ui_notify.shutil, "which", lambda n: "/usr/bin/zenity")
-    monkeypatch.setattr(subprocess, "run", MagicMock(return_value=_completed(1, "")))
+    monkeypatch.setattr(subprocess, "run", MagicMock(return_value=_completed(1, stderr)))
 
     assert ui_notify.show_error("PushNav", "busy") is True
+
+
+@pytest.mark.parametrize("rc", [-11, -6, 2, 127])
+def test_crashed_or_failed_cli_falls_through_to_next_backend(
+    monkeypatch, linux_with_display, rc
+):
+    monkeypatch.setattr(
+        ui_notify.shutil, "which", lambda n: f"/usr/bin/{n}" if n == "zenity" else None
+    )
+    monkeypatch.setattr(subprocess, "run", MagicMock(return_value=_completed(rc, "")))
+    box = MagicMock()
+    widgets = types.SimpleNamespace(
+        QApplication=MagicMock(instance=MagicMock(return_value=object())),
+        QMessageBox=MagicMock(return_value=box),
+    )
+    monkeypatch.setitem(sys.modules, "PyQt6", types.ModuleType("PyQt6"))
+    monkeypatch.setitem(sys.modules, "PyQt6.QtWidgets", widgets)
+
+    assert ui_notify.show_error("PushNav", "busy") is True
+    box.exec.assert_called_once()  # Qt took over after the crashed zenity
+
+
+def test_cli_dialog_runs_without_ld_library_path(monkeypatch, linux_with_display):
+    # The AppImage's AppRun exports a bundled LD_LIBRARY_PATH that can break zenity.
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/.mount_pushnav/usr/lib")
+    monkeypatch.setenv("KEEP_ME", "1")
+    monkeypatch.setattr(ui_notify.shutil, "which", lambda n: "/usr/bin/zenity")
+    run = MagicMock(return_value=_completed(0))
+    monkeypatch.setattr(subprocess, "run", run)
+
+    assert ui_notify.show_error("PushNav", "busy") is True
+
+    env = run.call_args.kwargs["env"]
+    assert "LD_LIBRARY_PATH" not in env
+    assert env["KEEP_ME"] == "1"
 
 
 def test_never_raises_when_backend_and_stderr_blow_up(monkeypatch):
