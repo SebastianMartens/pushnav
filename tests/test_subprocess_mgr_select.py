@@ -41,6 +41,8 @@ import os, sys, time
 from pathlib import Path
 with open(Path(os.environ["FAKE_DIR"]) / "starts.log", "a") as f:
     f.write("c " + " ".join(sys.argv[1:]) + "\\n")
+if os.environ.get("FAKE_C_EXIT"):
+    sys.exit(int(os.environ["FAKE_C_EXIT"]))
 from tests.mock_camera_server import MockCameraServer
 server = MockCameraServer(port=int(os.environ["FAKE_CAMERA_PORT"]), fps=20)
 server.start()
@@ -173,9 +175,34 @@ def test_recovery_attempts_start_with_the_server_that_worked(fakes, config, free
         # What _recovery_loop does for each attempt: drop the client, stop the process, spawn again.
         mgr._cleanup_client()
         mgr._terminate_process()
+        mgr._fork_begin_attempt()
         mgr._spawn_process()
         mgr._connect_with_retry()
         assert _starts(fakes) == ["dotnet ", "c ", "c "]  # the C# server is not asked a second time
+    finally:
+        mgr.stop()
+
+
+def test_a_fallback_that_fails_too_is_not_remembered(fakes, config, free_port, monkeypatch):
+    # IDS camera unplugged in the release layout: the C# server finds nothing (exit 3), the C server
+    # cannot drive the IDS camera either. The next attempt must ask the C# server again, so that a
+    # replugged camera is picked up.
+    monkeypatch.setenv("FAKE_C_EXIT", "1")
+    mgr = _make(config, free_port)
+    with pytest.raises(RuntimeError, match="rc=1"):
+        mgr.start()
+    assert _starts(fakes) == ["dotnet ", "c "]
+    assert mgr._server_plan.current.name == "dotnet"  # nothing connected, nothing remembered
+
+    mgr._fork_begin_attempt()
+    assert mgr._binary_path.name == "fake_dotnet.py"
+    monkeypatch.delenv("FAKE_C_EXIT")  # the camera is back, as far as the C server is concerned
+    mgr._spawn_process()
+    mgr._connect_with_retry()
+    mgr._fork_remember_connected()
+    try:
+        assert _starts(fakes) == ["dotnet ", "c ", "dotnet ", "c "]  # the C# server was asked first again
+        assert mgr._server_plan.current.name == "c"  # now the one that connected is remembered
     finally:
         mgr.stop()
 

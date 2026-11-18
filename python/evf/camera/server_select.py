@@ -72,16 +72,20 @@ class ServerPlan:
         """The server that is started next; after a fallback, the one that was switched to."""
         return self._current
 
-    def fallback_after_exit(self, exit_code: int | None) -> ServerChoice | None:
-        """The server to start instead when the current one exited with ``exit_code``, else None.
+    def fallback_after_exit(
+        self, exit_code: int | None, running: ServerChoice | None = None
+    ) -> ServerChoice | None:
+        """The server to start instead when ``running`` (default: the current one) exited with ``exit_code``.
 
         Only the C# server's exit code 3 triggers it, and only with the ``"dotnet"`` setting
         (so ``"c"`` never reaches the C# server) and an existing C server exe. Any other
-        failure follows the existing backoff unchanged.
+        failure follows the existing backoff unchanged. The fallback is not remembered until
+        it has connected: call :meth:`switch_to` then.
         """
+        running = running or self._current
         if (
             exit_code == EXIT_NO_SUPPORTED_CAMERA
-            and self._current.name == SERVER_DOTNET
+            and running.name == SERVER_DOTNET
             and self._no_camera_fallback is not None
         ):
             return self._no_camera_fallback

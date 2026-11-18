@@ -72,6 +72,8 @@ class SubprocessManager:
             self._server_plan.current.path if self._server_plan
             else self._resolve_binary(binary_path)
         )
+        # The server this attempt runs: the plan's current one, or the C fallback after exit code 3.
+        self._fork_running = self._server_plan.current if self._server_plan else None
         self._host = host
         self._port = port
         self._process: subprocess.Popen | None = None
@@ -92,6 +94,7 @@ class SubprocessManager:
         self._stop_event.clear()
         self._spawn_process()
         hello = self._connect_with_retry()
+        self._fork_remember_connected()
         self._fork_log_server(hello)
         self._client.start_receiving()
         self._start_monitor()
@@ -341,8 +344,10 @@ class SubprocessManager:
                     self._terminate_process()
                     if self._stop_event.is_set():
                         return
+                    self._fork_begin_attempt()
                     self._spawn_process()
                     self._connect_with_retry()
+                    self._fork_remember_connected()
                     self._client.start_receiving()
                     # Restore camera settings from config
                     if self._config.exposure is not None:
@@ -374,17 +379,18 @@ class SubprocessManager:
 
     def _fork_server_args(self) -> list[str]:
         """Extra command line for the C# server (PUSHNAV_CAMERA_SERVER_ARGS, dev use)."""
-        plan = self._server_plan
-        return server_select.extra_args(plan.current) if plan else []
+        running = self._fork_running
+        return server_select.extra_args(running) if running else []
 
     def _fork_fall_back_to_c_server(self, exit_code: int | None) -> bool:
         """The C# server found no supported camera (exit code 3): start the C server instead.
 
         Runs inside the same connect attempt, so it consumes no backoff step. The
-        server that comes up is remembered, so recovery attempts start with it.
+        fallback is remembered only once it has connected (_fork_remember_connected); a
+        fallback that fails too leaves the next attempt starting the C# server again.
         """
         plan = self._server_plan
-        fallback = plan.fallback_after_exit(exit_code) if plan else None
+        fallback = plan.fallback_after_exit(exit_code, self._fork_running) if plan else None
         if fallback is None:
             return False
         stderr_text = ""
@@ -400,18 +406,30 @@ class SubprocessManager:
             exit_code, stderr_text or "(empty)",
         )
         self._process = None
-        plan.switch_to(fallback)
+        self._fork_running = fallback
         self._binary_path = fallback.path
         self._spawn_process()
         return True
 
+    def _fork_begin_attempt(self) -> None:
+        """A new (re)start attempt begins with the remembered server, not with a fallback that failed."""
+        plan = self._server_plan
+        if plan is not None:
+            self._fork_running = plan.current
+            self._binary_path = plan.current.path
+
+    def _fork_remember_connected(self) -> None:
+        """The server that connected is the one recovery attempts start with (spec 8.2)."""
+        if self._server_plan is not None and self._fork_running is not None:
+            self._server_plan.switch_to(self._fork_running)
+
     def _fork_log_server(self, hello: dict) -> None:
         """After HELLO: which server answered, and what it drives."""
-        if self._server_plan is None:
+        if self._server_plan is None or self._fork_running is None:
             return
         logger.info(
             "Camera server %r (%s): backend=%s camera_model=%s",
-            self._server_plan.current.name,
+            self._fork_running.name,
             Path(self._binary_path).name,
             hello.get("backend"),
             hello.get("camera_model"),
