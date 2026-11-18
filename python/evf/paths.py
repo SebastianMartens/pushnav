@@ -167,6 +167,25 @@ def camera_binary() -> Path:
     )
 
 
+# fork: camera-server-dotnet (see specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md section 8.2)
+def windows_camera_server_paths() -> tuple[Path, Path]:
+    """(C# server, C server) exe locations on Windows; existence is not checked.
+
+    Windows release: both sit next to the app executable. Dev checkout: the C#
+    server in camera/windows-dotnet/publish/ (build.bat output) and the C
+    server in camera/windows/. Chosen between by evf.camera.server_select.
+    """
+    if _WINDOWS_RELEASE:
+        return (
+            _RELEASE_ROOT / "camera_server_dotnet.exe",
+            _RELEASE_ROOT / "camera_server.exe",
+        )
+    return (
+        _REPO_ROOT / "camera" / "windows-dotnet" / "publish" / "camera_server_dotnet.exe",
+        _REPO_ROOT / "camera" / "windows" / "camera_server.exe",
+    )
+
+
 def web_dist_dir() -> Path:
     """Path to the built React app (web/dist/) — present only in release or after `npm run build`."""
     if _BUNDLE_MODE:
