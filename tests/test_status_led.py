@@ -74,7 +74,9 @@ def test_find_leds_green_only(tmp_path):
     assert sl.find_leds(root) == {"green": root / "ACT/brightness"}
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root can write read-only files")
+@pytest.mark.skipif(
+    getattr(os, "geteuid", lambda: -1)() == 0, reason="root can write read-only files"
+)
 def test_find_leds_skips_unwritable(tmp_path):
     root = _sysfs(tmp_path, ["ACT", "PWR"], mode=0o444)
     assert sl.find_leds(root) == {}
@@ -236,11 +238,17 @@ def test_flash_requests_during_a_flash_are_merged():
 
 # -- root helper (take / restore) --------------------------------------------------
 
-import grp
 import json
 import stat
 
-from evf.engine import led_helper as lh
+try:
+    import grp
+
+    from evf.engine import led_helper as lh
+except ImportError:  # Windows: no grp; the root LED helper only runs on the Pi
+    grp = lh = None
+
+needs_led_helper = pytest.mark.skipif(lh is None, reason="led_helper needs grp (POSIX only)")
 
 
 def _helper_sysfs(tmp_path, leds):
@@ -272,9 +280,10 @@ def _snapshot(root):
     }
 
 
-_MY_GROUP = grp.getgrgid(os.getgid()).gr_name
+_MY_GROUP = grp.getgrgid(os.getgid()).gr_name if grp else ""
 
 
+@needs_led_helper
 def test_take_then_restore_round_trip(tmp_path):
     root = _helper_sysfs(tmp_path, {"ACT": ("mmc0", 0, 0o644), "PWR": ("default-on", 1, 0o644)})
     before = _snapshot(root)
@@ -292,6 +301,7 @@ def test_take_then_restore_round_trip(tmp_path):
     assert list(state.iterdir()) == []
 
 
+@needs_led_helper
 def test_second_take_keeps_the_original_state(tmp_path):
     root = _helper_sysfs(tmp_path, {"ACT": ("mmc0", 0, 0o644)})
     state = tmp_path / "state"
@@ -302,6 +312,7 @@ def test_second_take_keeps_the_original_state(tmp_path):
     assert _trigger(root / "ACT") == "mmc0"
 
 
+@needs_led_helper
 def test_restore_without_state_is_a_noop(tmp_path):
     root = _helper_sysfs(tmp_path, {"ACT": ("mmc0", 0, 0o644)})
     before = _snapshot(root)
@@ -309,6 +320,7 @@ def test_restore_without_state_is_a_noop(tmp_path):
     assert _snapshot(root) == before
 
 
+@needs_led_helper
 def test_take_handles_green_only_and_old_names(tmp_path):
     root = _helper_sysfs(tmp_path, {"led0": ("mmc0", 0, 0o644)})
     state = tmp_path / "state"
@@ -318,6 +330,7 @@ def test_take_handles_green_only_and_old_names(tmp_path):
     assert _trigger(root / "led0") == "mmc0"
 
 
+@needs_led_helper
 @pytest.mark.parametrize("config,expected", [
     (None, True),                                   # no config file yet
     ({"led": {"enabled": True}}, True),
@@ -334,6 +347,7 @@ def test_led_enabled(tmp_path, config, expected):
         assert not path.exists()  # never creates the config as root
 
 
+@needs_led_helper
 def test_main_take_respects_disabled_config(tmp_path):
     root = _helper_sysfs(tmp_path, {"ACT": ("mmc0", 0, 0o644)})
     cfg = tmp_path / "config.json"
@@ -346,6 +360,7 @@ def test_main_take_respects_disabled_config(tmp_path):
     assert not state.exists()
 
 
+@needs_led_helper
 def test_main_never_fails(tmp_path):
     root = _helper_sysfs(tmp_path, {"ACT": ("mmc0", 0, 0o644)})
     rc = lh.main(["take", "--group", "no-such-group-xyz", "--root", str(root),

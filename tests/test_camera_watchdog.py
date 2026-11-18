@@ -1,6 +1,7 @@
 """Tests for Engine.retry_camera + the headless camera watchdog."""
 
 import logging
+import sys
 import time
 
 import pytest
@@ -147,6 +148,7 @@ def test_usb_probe_ignores_soc_video_blocks(tmp_path, monkeypatch):
     assert _usb_video_device_present() is False
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="fake sysfs path contains ':' (invalid on Windows)")
 def test_usb_probe_finds_usb_camera(tmp_path, monkeypatch):
     root = _fake_sysfs(tmp_path, {
         "video0": "/sys/devices/platform/axi/1f00300000.usb/xhci-hcd.1/usb3/3-2/3-2:1.0",

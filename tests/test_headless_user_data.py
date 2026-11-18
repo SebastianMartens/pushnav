@@ -19,12 +19,19 @@
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
 USER_DATA = Path(__file__).resolve().parent.parent / "packaging/headless/user-data"
+
+# Windows runners put Git's sh.exe on PATH, but it can't take Windows paths
+# (backslashes) spliced into the script, so run these on POSIX only.
+needs_posix_sh = pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("sh") is None, reason="needs a POSIX shell"
+)
 
 
 @pytest.fixture(scope="module")
@@ -56,7 +63,7 @@ def _install_step(config):
     return next(step for step in config["runcmd"] if "apt-get install" in step)
 
 
-@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX shell")
+@needs_posix_sh
 @pytest.mark.parametrize("folder", ["", "pushnav", "firmware/pushnav"])
 @pytest.mark.parametrize("name", [
     "pushnav-headless_0.3.0~beta6-1_arm64.deb",  # local build
@@ -73,7 +80,7 @@ def test_install_step_finds_the_deb(config, tmp_path, folder, name):
     assert out.stdout.strip() == str(boot / folder / name)
 
 
-@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX shell")
+@needs_posix_sh
 def test_install_step_reports_a_missing_deb(config, tmp_path):
     boot = tmp_path / "bootfs"
     boot.mkdir()
