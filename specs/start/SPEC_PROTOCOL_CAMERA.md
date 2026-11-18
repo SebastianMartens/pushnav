@@ -536,7 +536,8 @@ Python mock and, when available, real servers.
 ### 11.9 Open questions (protocol)
 
 - Gain units: IDS reports a 0–100 scaled master gain; real dB is not
-  available from the uEye API for every model. Proposed: `raw` now; a
+  available from the uEye API for every model. **Decided (Sebastian,
+  2026-11-18): `raw` 0–100**, shown as a plain number (effectively %). A
   backend may switch to `x` (gain factor) later without a protocol change.
 - The upstream servers (macOS Swift, Linux C, **Windows C/DirectShow**)
   stay v1 and are not modified by this fork, so upstream changes to them
@@ -545,6 +546,9 @@ Python mock and, when available, real servers.
 - Fix the Swift server's disconnect-on-unknown-type (§3 known issue) before
   any v2 client sends SET_STREAM_CONFIG to it? Not needed: a v2 client only
   sends v2 messages in a v2 session, and Swift never negotiates v2.
+  **Decided (Sebastian, 2026-11-18): this fork does not fix it.** It's left
+  to the upstream maintainer, in keeping with "upstream servers stay
+  unmodified". Our own C# server still ignores unknown types, as specified.
 
 ---
 

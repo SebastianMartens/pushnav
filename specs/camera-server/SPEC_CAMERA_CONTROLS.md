@@ -591,10 +591,10 @@ reason for the wide database in §5.4.
 
 | # | Question | Needs | Blocks approval? |
 |---|---|---|---|
-| Q2 | Exposure cap for the UI: 4 s proposed (sensor allows 30 s). | Sebastian | No |
-| Q3 | Gain shown as `raw` 0–100 for IDS, OK? (protocol §11.9) | Sebastian | No |
-| Q4 | Calibration per camera: proposed "ignore calibration from another camera" (§4.2) instead of storing calibration per profile. OK? | Sebastian | No |
-| Q5 | Should a binning change be blocked while TRACKING, or allowed (pointing survives, overlays rescale)? Proposed: allowed. | Sebastian | No |
+| Q2 | ~~Exposure cap for the UI: 4 s proposed (sensor allows 30 s).~~ **Resolved 2026-11-18: 4 s, as proposed.** | Sebastian | — |
+| Q3 | ~~Gain shown as `raw` 0–100 for IDS, OK? (protocol §11.9)~~ **Resolved 2026-11-18: yes, a plain 0–100 number (effectively %).** | Sebastian | — |
+| Q4 | ~~Calibration per camera: proposed "ignore calibration from another camera" (§4.2) instead of storing calibration per profile. OK?~~ **Resolved 2026-11-18: as proposed.** | Sebastian | — |
+| Q5 | ~~Should a binning change be blocked while TRACKING, or allowed (pointing survives, overlays rescale)? Proposed: allowed.~~ **Resolved 2026-11-18: allowed, as proposed.** | Sebastian | — |
 | Q6 | **[HW]** Centroid parameters at ~48"/px (1x1) and ~97"/px (2x2) on IMX174 frames: do `sigma_threshold`, `max_pixels`, `matched_filter_sigma` need re-tuning (possibly per database)? | Sebastian + camera + sky | No |
 | Q7 | **[HW]** Wide database: solve rate, solve time and false-positive probability with the proposed 18°–32° / mag 7.0 parameters at 1x1 and 2x2; tune FOV range and magnitude from the results. | Sebastian + camera + sky | No |
 | Q8 | **[HW]** Does tetra3rs's `max_fov_deg` refer to the horizontal FOV (as `fov_estimate` does) or the pattern diameter? The IDS setup has a ~30° diagonal at the top of the proposed range. If solves fail near the corners, raise `max_fov_deg`. | camera + sky | No |
