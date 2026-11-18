@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>camera_server_dotnet</AssemblyName>
+    <RootNamespace>PushNav.CameraServer</RootNamespace>
+    <Description>PushNav camera server for Windows (C# / Native AOT)</Description>
+
+    <!-- Native AOT, single native exe. Setting PublishAot also turns on the AOT, trim and
+         single-file analyzers during a normal build, so warnings show up without publishing. -->
+    <PublishAot>true</PublishAot>
+    <IsAotCompatible>true</IsAotCompatible>
+    <OptimizationPreference>Speed</OptimizationPreference>
+    <StackTraceSupport>true</StackTraceSupport>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.371">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!-- SDK 10.0.301 bundles ILCompiler / NativeAOT runtime 10.0.9, which NuGet audit flags (GHSA-p3jp-9v83-76w9,
+       Brotli decoder). Warnings are errors here, so use the patched packs instead of suppressing the advisory. -->
+  <ItemGroup>
+    <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler" ILCompilerPackVersion="10.0.15" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="PushNav.CameraServer.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PushNav.CameraServer/PushNav.CameraServer.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PushNav.CameraServer.Tests/PushNav.CameraServer.Tests.csproj" />
+  </Folder>
+</Solution>
