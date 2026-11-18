@@ -74,7 +74,7 @@ PushNav also works with **IDS uEye** industrial cameras on Windows. The model it
 - The camera runs in 8-bit mono with all automatic exposure, gain and frame-rate features switched off. Frames are sent to the app as grayscale JPEG, about 10 frames per second at the default settings.
 - **Exposure** appears in the app in the same units as for the OV9281 (steps of 0.1 ms, 0.1 ms to 1.5 s). A longer exposure lowers the frame rate by itself so the frame always fits. Beyond about 1 s the sensor switches to its long-exposure mode and stays there until the camera server restarts (leaving that mode would interrupt the picture for about 2.5 s); shorter exposures are still accepted in that mode.
 - **Gain** is the sensor's master gain, 0 to 100.
-- If the camera is unplugged the camera server stops and the app tries to reconnect for about half a minute. If you plug the camera back in later, use the app's *Retry camera* button.
+- If the camera is unplugged the camera server stops and the app keeps trying to reconnect for a minute or more. If the camera is back only after that, use the app's *Retry camera* button.
 
 **Choosing the camera server.** The default `"dotnet"` starts the C# server first and falls back to the original C server when the C# server finds no supported camera (that is how the OV9281 modules keep working). To force one of them set `camera.windows_server` to `"dotnet"` or `"c"` in the config file, or set the environment variable `PUSHNAV_CAMERA_SERVER` for a single run. `camera_server_dotnet.exe --list` prints the cameras it sees and their controls as JSON, which is the first thing to check when a camera is not found.
 
