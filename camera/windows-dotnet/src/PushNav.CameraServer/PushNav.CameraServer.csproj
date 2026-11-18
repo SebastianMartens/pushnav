@@ -22,8 +22,11 @@
   </ItemGroup>
 
   <!-- SDK 10.0.301 bundles ILCompiler / NativeAOT runtime 10.0.9, which NuGet audit flags (GHSA-p3jp-9v83-76w9,
-       Brotli decoder). Warnings are errors here, so use the patched packs instead of suppressing the advisory. -->
-  <ItemGroup>
+       Brotli decoder). Warnings are errors here, so use the patched packs instead of suppressing the advisory.
+       Only applies while the SDK's bundled runtime version is below 10.0.15, so it can never downgrade a newer SDK.
+       REMOVE this block once global.json points at an SDK whose bundled ILCompiler pack is >= 10.0.15. -->
+  <ItemGroup Condition="$([MSBuild]::VersionLessThan('$(BundledNETCoreAppPackageVersion)', '10.0.15'))">
+    <!-- Item identity is the same for every target framework, so this also touches the net9/net8 entries; unused here. -->
     <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler" ILCompilerPackVersion="10.0.15" />
   </ItemGroup>
 
