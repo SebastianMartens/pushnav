@@ -1,6 +1,6 @@
 # SPEC_CAMERA_CONTROLS.md — PushNav
 
-Version: 1.0
+Version: 1.1 (2026-11-18: 25 mm reference lens, wide-field solver database)
 Status: Draft — awaiting approval, not yet implemented
 Date: 2026-11-18
 Target: all platforms (engine, config, web UI); camera side on the Windows C# server first
@@ -123,6 +123,7 @@ keys are **added** and picked up by `_merge_defaults`:
   "extra_camera_ids": [],
   "windows_server": "auto",
   "max_exposure_us": 4000000,
+  "last_camera_key": null,
   "profiles": {
     "ids:1409:3060": {
       "controls": {
@@ -143,6 +144,8 @@ keys are **added** and picked up by `_merge_defaults`:
   §9 Q2). The engine clamps the advertised `max` to it before sending
   controls to the UI.
 - `fov_source`: `"user"` | `"learned"` | `null` (§5.2).
+- `last_camera_key`: the camera key of the last connected camera; picks
+  the solver database to load at startup (§5.4.3).
 
 ### 4.2 Rules
 
@@ -196,49 +199,223 @@ Rules:
   (it does not depend on pixel size).
 - Sync calibration stays valid across binning changes: `sync_d_body` is a
   body-frame unit vector and the FOV does not change with binning; the
-  sync origin pixel is recomputed from the current width (§5.3).
+  sync origin pixel is recomputed from the current width (§5.6).
 - v1 sessions: geometry = HELLO `default_width/height`, corrected by the
   size of the first decoded frame (logged if they differ).
 
-### 5.2 FOV for the solver
+### 5.2 FOV per camera profile
 
 Binning changes pixels, not the sky area, so the solver's FOV estimate is
-a property of **camera + lens**, stored per profile:
+a property of **camera + lens**, stored per profile (`fov_h_deg`,
+horizontal, whole sensor width):
 
 1. `profiles[key].fov_h_deg` if set (`fov_source` `"user"` or `"learned"`).
 2. Else from lens data, if the user entered a focal length in Settings:
    `fov = 2 * atan(sensor_width_mm / (2 * f_mm))` with
    `sensor_width_mm = capabilities.sensor.width * pixel_size_um / 1000`.
-   (IMX174: 11.34 mm wide.)
-3. Else the legacy default **8.86°** (the OV9281 + stock lens setup).
+3. Else, for a profile with no FOV yet: **FOV search** (§5.4.4).
+4. v1 servers / unknown sensors with no FOV and no search result: the
+   legacy default **8.86°** (the OV9281 + stock lens setup).
 
-Learning: after 5 consecutive valid solves, take the median of the
-solver's `fov_deg` (tetra3rs `SolveResult.fov_deg`, solved horizontal FOV)
-and store it as `fov_source = "learned"` if it differs from the current
-value by more than 2 %. A `"user"` value is never overwritten.
+#### 5.2.1 Reference configurations
 
-`PlateSolver.solve_frame(image_bytes, fov_estimate_deg=...)` takes the FOV
-as a parameter (default 8.86 keeps today's behaviour). `_FOV_MAX_ERROR_DEG`
-stays 1.5°.
+| Setup | Sensor | Pixels | Pixel | Sensor size | Lens | FOV (h x v, diag) | Plate scale 1x1 / 2x2 |
+|---|---|---|---|---|---|---|---|
+| Legacy (upstream default) | OV9281 | 1280x720 (as streamed) | — | — | stock | 8.86° x 4.98° (`SPEC_ARCHITECTURE.md` §8.1) | 24.9"/px / — |
+| **IDS reference (Sebastian)** | IMX174 (UI-306xCP-M) | 1936x1216 | 5.86 µm | 11.35 x 7.13 mm | **25 mm** Basler | **25.6° x 16.2°**, ~30° diag | **48.3"/px** / **96.7"/px** |
 
-**Database limit**: the shipped database solves only 7°–10° FOV. With the
-IMX174's 11.34 mm width that means a focal length of about **65–93 mm**
-(8.86° ≈ 73 mm). Outside that range solving fails no matter what the
-engine does; a wider/narrower lens needs a rebuilt database (separate
-change). The engine logs a WARNING and the Settings panel shows a hint
-when the configured/learned FOV is outside `[7, 10]`. See §9 Q1.
+Plate scale = `206.265 * pixel_um / f_mm` arcsec/px; 2x2 binning doubles
+it. Binning does not change the FOV.
 
-Centroid parameters (`_CENTROID_PARAMS`) were tuned on 1280x720 frames.
-They are not changed here; verify on IMX174 frames at 1x1 and 2x2 (task 6.3).
+The shipped database (7°–10°) cannot solve the IDS reference setup. §5.4
+adds a second, wide-field database.
 
-### 5.3 Web server geometry
+#### 5.2.2 Learning the FOV
+
+After 5 consecutive valid solves, take the median of the solver's
+`fov_deg` (tetra3rs `SolveResult.fov_deg`, solved horizontal FOV) and
+store it as `fov_source = "learned"` if it differs from the current value
+by more than 2 %. Guards against drift:
+
+- A `"user"` value is never overwritten.
+- The learned value must lie inside the **active database's** FOV range
+  shrunk by 5 % at each end; otherwise it is not stored (WARNING once).
+  This keeps a few bad solves from walking the FOV out of the range the
+  loaded database can solve, which would make every later solve fail.
+- A single update may change the FOV by at most 10 %; bigger jumps need
+  two consecutive learning rounds that agree within 2 %.
+- Learned values are per profile, so another camera never inherits them.
+
+### 5.3 Solver parameters from the profile
+
+`solver/solver.py` today hardcodes `_FOV_DEG = 8.86` and
+`_FOV_MAX_ERROR_DEG = 1.5` (lines 54–55). Both move to arguments:
+
+```python
+solver.solve_frame(image_bytes, fov_estimate_deg=fov, fov_max_error_deg=err)
+```
+
+- `fov` = the profile FOV (§5.2).
+- `err` = `max(1.5, 0.10 * fov)`: 1.5° for the legacy 8.86° setup
+  (unchanged), 2.6° for the IDS reference. During FOV search (§5.4.4) the
+  error is the half-width of the active database's range.
+- The solver thread reads `fov`/`err` from an engine-owned, lock-protected
+  `SolverParams` snapshot at the start of each solve, so a profile or
+  database change takes effect on the next frame.
+- `_CENTROID_PARAMS` are unchanged in this spec; they were tuned on
+  1280x720 frames at 24.9"/px. At 48"/px (1x1) and 97"/px (2x2) stars
+  cover fewer pixels; verify (task 6.3, §9 Q6). If they need different
+  values, they become per-database parameters next to the FOV range.
+
+### 5.4 Solver databases (narrow and wide)
+
+#### 5.4.1 Proposed wide-field database
+
+| Parameter | Narrow (shipped today) | **Wide (new, proposed)** |
+|---|---|---|
+| File | `data/tetra3rs_gaia.bin` | `data/tetra3rs_gaia_wide.bin` |
+| `min_fov_deg` / `max_fov_deg` | 7.0 / 10.0 | **18.0 / 32.0** |
+| `star_max_magnitude` | 8.0 | **7.0** |
+| `pattern_max_error` | 0.005 | 0.005 |
+| `verification_stars_per_fov` | 30 | 30 |
+| `epoch_proper_motion_year` | 2026.0 | 2026.0 |
+| Stars / patterns | 62 793 / 1 914 984 | 21 399 / 348 742 |
+| File size | 52.8 MB | **9.7 MB** (5.5 MB zipped) |
+| Load time (dev laptop) | 0.13 s | 0.03 s |
+
+Star, pattern, size and load numbers were **measured** on 2026-11-18 by
+building the candidate in a scratch directory with the installed
+tetra3rs 0.7.1. Nothing was committed.
+
+Why these starting values:
+
+- **FOV 18°–32°**: centred on the 25.6° reference with about ±30 % room.
+  That covers focal lengths from about 20 mm (31.7°) to 35 mm (18.4°) on
+  the IMX174, as well as the learned FOV moving within the 5 % guard band
+  (§5.2.2). A 20°–30° variant measured 8.2 MB / 291k patterns, so the
+  wider range costs only ~1.5 MB.
+- **Magnitude 7.0**: a 25.6° x 16.2° field (415 deg²) holds ~215 stars
+  ≤ mag 7 on average, and still ~70 near the galactic poles. That is
+  well above the 30 verification stars, while the solver only uses the
+  30 brightest centroids (`max_centroids=30`, typically mag ≤ 5.5–6 in
+  such a field). Magnitude 6.5 measured 7.8 MB but leaves only ~40 stars
+  per field near the poles. Magnitude 8 (the narrow value) adds no
+  pattern benefit at this scale and makes the file bigger.
+- Other parameters are copied from the narrow database so the two behave
+  the same way.
+
+The final values are **tuned on the real camera** (task 6.3): solve
+rate, solve time and false-positive probability on sky frames from the
+IDS reference setup at 1x1 and 2x2. The numbers above are starting points.
+
+#### 5.4.2 Building both
+
+`scripts/build_tetra3rs_catalog.py` becomes parameterised:
+
+- A table of database specs in the script (`name`, output file, FOV range,
+  magnitude, other parameters). Today's values become the `narrow` entry.
+- `--db narrow|wide|all` (default `all`). An existing output file is still
+  skipped unless `--force` is given, as today.
+- The script writes a sidecar entry for each built file (FOV range,
+  magnitude, star/pattern counts, a content hash) into
+  `data/solver_dbs.json`. The engine reads this file (§5.4.3), so FOV
+  ranges are not hardcoded twice.
+- `data/VERSION.json` keeps `solver_db_version` (narrow) as a string and
+  gains `solver_db_version_wide` (`"tetra3rs_gaia_wide_<hash>_mag7"`).
+  It stays a flat object because the release workflow rewrites the file
+  with PowerShell `ConvertTo-Json` / Python `json.dump`. Only the engine's
+  startup log reads it; `/api/version` reports only app and protocol
+  versions.
+- `scripts/bench_solvers.py` gets `--db` to benchmark either file.
+
+Shipping (both files always shipped):
+
+| Package | Change | Size impact |
+|---|---|---|
+| macOS `.dmg` (`build_mac.sh`) | copy both into `Resources/` | +9.7 MB raw, ~+5.5 MB compressed |
+| Linux tar.gz / AppImage (`build_linux.sh`) | copy both into `data/` | same |
+| Windows zip / installer (`build_windows.bat`, `pushnav.iss` picks up the directory) | copy both into `data\` | same |
+| Pi `.deb` (`build_headless_deb.sh`) | copy both into `$APP/data/` | +9.7 MB installed, ~+5.5 MB `.deb` |
+| CI (`build.yml` "Verify required files" steps, 4 jobs) | add `data/tetra3rs_gaia_wide.bin` | — |
+
+The wide file is committed to git like the narrow one (it is a quarter of
+its size). The Pi `.deb` ships it too: the Pi can use a wide-field lens,
+and 9.7 MB on an SD card is negligible.
+
+`evf/paths.py`: `tetra3rs_database_path()` stays (narrow, for existing
+callers and tests). A new `solver_db_dir()` returns the directory holding
+`solver_dbs.json` and both files, in all modes (dev, macOS bundle,
+Linux/Windows release, headless `PUSHNAV_ROOT`).
+`tests/test_paths_headless.py` covers it.
+
+#### 5.4.3 Choosing the database
+
+- `PlateSolver` gets a small registry built from `solver_dbs.json`:
+  `[(name, path, min_fov, max_fov)]`.
+- Active database = the one whose `[min_fov, max_fov]` contains the
+  profile FOV. If two contain it, the narrower one wins. If none does, the
+  closest range is used, a WARNING is logged and the state flag
+  `fov_out_of_range` is set (the Settings panel shows a hint).
+- **Only one database is loaded at a time.** At startup the engine loads
+  the one for the last-used profile (`camera.last_camera_key`, new config
+  key). With no last profile it loads the narrow one, which is today's
+  behaviour.
+- On camera connect (HELLO gives the camera key), and whenever the profile
+  FOV moves into another range (user edit or learning), the engine
+  loads the new database on the solver thread between two solves, then
+  drops the old one. Loading takes ≤ 0.15 s on the dev laptop; the solver
+  just skips frames during it.
+- Memory: the narrow database is ~53 MB on disk and roughly the same in
+  RAM; the wide one is ~10 MB. Holding both would cost ~63 MB, which
+  matters on the Pi 3A+ (512 MB RAM). Hence one at a time. Exception:
+  FOV search (§5.4.4) may hold both for its duration. To be measured on
+  the Pi (task 4.8).
+
+#### 5.4.4 FOV search (profile without a FOV)
+
+A new camera with no FOV (no user value, no focal length) would otherwise
+fall back to 8.86° and never solve with a wide lens. Instead:
+
+1. The solver alternates frames between the databases, starting with the
+   one whose range contains the sensor-based guess if the sensor size is
+   known. Each solve uses `fov_estimate` = the database's centre FOV and
+   `fov_max_error` = half its range.
+2. The first valid solve (normal `min_matches` / `max_prob` checks) fixes
+   that database and stores `fov_h_deg` = the solved `fov_deg` with
+   `fov_source = "learned"`. From then on the normal learning rules apply
+   (§5.2.2).
+3. Search is only active in states that already run the solver
+   (`SPEC_ARCHITECTURE.md` §4.2) and is shown in the UI ("Finding field of
+   view…").
+
+For the IDS reference setup the user can skip the search by entering
+25 mm in Settings (§6.3).
+
+### 5.5 FOV and pixel assumptions elsewhere (audit)
+
+Code that assumes the ~8.86° field or 1280x720, as of `main` 2271bc4:
+
+| Location | Assumption | Change |
+|---|---|---|
+| `python/evf/solver/solver.py:54–55` | `_FOV_DEG = 8.86`, `_FOV_MAX_ERROR_DEG = 1.5` | from the profile (§5.3) |
+| `python/evf/webserver/server.py:53–55` | `_FOV_H = 8.86`, `_IMG_W = 1280`, `_IMG_H = 720`; used by `_compute_origin()` and the navigation projection, and sent to the UI as `fov_h_deg` / `image_w` / `image_h` | from the engine (§5.6) |
+| `python/evf/solver/solver.py` `_CENTROID_PARAMS` | tuned at 24.9"/px | verify at 48 / 97"/px (task 6.3) |
+| `python/evf/solver/thread.py:131–133` | calibration: `_CALIBRATE_MIN_SEP = 0.5°`, `_CALIBRATE_STABLE_TOL = 0.05°` | in degrees, so they stay valid. 0.05° is ~3.7 px at 1x1 and ~1.9 px at 2x2 on the IDS setup, still above solve jitter. Verify with the camera (task 6.2); no change planned |
+| `web/src/components/live-view/NavOverlay.tsx:8` | `LOCKED_THRESHOLD_DEG = 0.15` | in degrees, OK (~11 px at 48"/px); no change |
+| `web/src/components/live-view/NavOverlay.tsx`, `SyncCandidatesOverlay.tsx`, `StarOverlay.tsx` | marker radii, stroke widths and font sizes in **image pixels** (viewBox = `image_w x image_h`), sized for 1280 px wide | scale by `image_w / 1280` (one helper), so markers keep their on-screen size at 1936 (else ~34 % smaller) and 968 (else ~32 % bigger) |
+| `web/src/components/live-view/NavOverlay.tsx:149`, `TrackingStep.tsx:36`, `AxesOverlay.tsx:25`, `LiveView.tsx` | use `state.fov_h_deg`, `image_w`, `image_h` | already dynamic; no change |
+| `web/src/components/live-view/SkyDome/*` (`SkyDomeCanvas.tsx` `SCOPE_LENGTH = RADIUS * 0.3`, `SCOPE_RADIUS = 0.1`; `HemisphereGrid`, `Marker`) | telescope cylinder and markers are fixed decorative sizes on a unit dome; nothing is derived from the camera FOV (there is no FOV cone) | no change. A FOV footprint on the dome would be a separate feature |
+| `web/src/components/wizard/Wizard.test.tsx` fixtures | 1280x720 / 8.86 | tests only; add one 1936x1216 / 25.6° case |
+| `specs/start/SPEC_ARCHITECTURE.md` §8.1, §8.4 | "Camera Optical Geometry" 8.86° / 24.9"/px | document per-profile FOV and both databases when this lands (task 7.1) |
+
+### 5.6 Web server geometry
 
 `webserver/server.py`: replace the module constants with values from the
 engine:
 
 - `image_w`, `image_h` from the current `StreamGeometry` (fallback
   1280x720 when no camera is connected, as today).
-- `fov_h_deg` from §5.2.
+- `fov_h_deg` from §5.2, plus `fov_source`, `solver_db` (active database name) and `fov_out_of_range` for the UI.
 - `_compute_origin()` and the navigation projection take
   `(fov_h, img_w, img_h)` as arguments.
 
@@ -292,10 +469,16 @@ Behaviour:
 
 ### 6.3 Settings panel
 
-Add, under Camera: the connected camera (`camera_model`, backend), the
-FOV with its source, and an optional **focal length (mm)** field that sets
-`fov_h_deg` (`fov_source = "user"`). A "Reset to learned" action clears a
-user value. (Needed for the IDS camera, §9 Q1.)
+Under Camera, add:
+- the connected camera (`camera_model`, backend);
+- the FOV with its source (user / learned / searching / default) and the
+  active solver database (narrow / wide);
+- an optional **focal length (mm)** field that sets `fov_h_deg`
+  (`fov_source = "user"`). For the IDS reference setup the user enters
+  25 mm and gets 25.6° with the wide database, with no FOV search;
+- a "Reset to learned" action that clears a user value;
+- a hint when `fov_out_of_range` is set ("No star database covers this
+  field of view").
 
 ---
 
@@ -307,7 +490,9 @@ user value. (Needed for the IDS camera, §9 Q1.)
 - v2 in the macOS Swift and Linux C servers (they stay v1; their
   controls keep working through §3.1).
 - ROI/cropping, gain boost, pixel clock in the UI.
-- Rebuilding the tetra3rs database for other FOVs.
+- Databases beyond the two in §5.4 (e.g. very wide all-sky lenses, or
+  long focal lengths below 7°).
+- A FOV footprint on the Sky View dome.
 
 ---
 
@@ -326,37 +511,49 @@ user value. (Needed for the IDS camera, §9 Q1.)
   legacy migration, `CONFIG_VERSION` unchanged and old configs load.
 - pytest, subprocess manager: stall timeout from frame interval;
   paused while reconfiguring; `restore_controls` order.
-- pytest, solver: `solve_frame(..., fov_estimate_deg=8.86)` matches today
-  on `tests/samples`; downscaled 2x samples still solve; FOV learning median.
+- pytest, solver: `solve_frame(..., fov_estimate_deg=8.86, fov_max_error_deg=1.5)`
+  matches today on `tests/samples`; downscaled 2x samples still solve;
+  FOV learning median with the range guard and the 10 % step limit;
+  database registry selection (inside, overlap, out of range); FOV
+  search picks the database that solves.
+- pytest, wide database: no wide-field sky sample exists in
+  `tests/samples` yet. Add one IDS frame (or a synthetic frame rendered
+  from the Gaia catalog at 25.6° / 1936x1216) once available (task 6.3),
+  then assert it solves with the wide database and not with the narrow one.
+- pytest, paths: `solver_db_dir()` in dev, release and headless layouts.
 - pytest, web server: `image_w/h` and `fov_h_deg` follow the engine;
   `/api/control` float and enum validation (`tests/test_webserver_api.py`,
   `test_webserver_payload.py`).
 - vitest: `CameraControls` renders int/float/enum, log slider mapping,
-  unit labels (incl. v1 units).
+  unit labels (incl. v1 units); overlay marker scaling at 968/1280/1936 px.
 - Hardware: see tasks marked **[HW]**.
 
 ---
 
 ## 9. Open Questions
 
+Resolved: the IDS camera uses a **25 mm Basler lens** (answered by
+Sebastian on #3). This is the reference configuration in §5.2.1 and the
+reason for the wide database in §5.4.
+
 | # | Question | Needs | Blocks approval? |
 |---|---|---|---|
-| Q1 | Which lens/focal length is on the IDS camera? The database solves only 7°–10° FOV (~65–93 mm on the IMX174). If the lens is outside that, we need a database rebuild (and a decision on its size) before the IDS camera can plate-solve. | Sebastian | **Yes** (for solving with the IDS camera) |
 | Q2 | Exposure cap for the UI: 4 s proposed (sensor allows 30 s). | Sebastian | No |
 | Q3 | Gain shown as `raw` 0–100 for IDS, OK? (protocol §11.9) | Sebastian | No |
 | Q4 | Calibration per camera: proposed "ignore calibration from another camera" (§4.2) instead of storing calibration per profile. OK? | Sebastian | No |
 | Q5 | Should a binning change be blocked while TRACKING, or allowed (pointing survives, overlays rescale)? Proposed: allowed. | Sebastian | No |
-| Q6 | Centroid parameters on IMX174 frames (1x1 and 2x2): need re-tuning? | camera + sky | No |
-
-Q1 is posted on issue #3, which is labelled `needs-human` until it is answered.
+| Q6 | **[HW]** Centroid parameters at ~48"/px (1x1) and ~97"/px (2x2) on IMX174 frames: do `sigma_threshold`, `max_pixels`, `matched_filter_sigma` need re-tuning (possibly per database)? | Sebastian + camera + sky | No |
+| Q7 | **[HW]** Wide database: solve rate, solve time and false-positive probability with the proposed 18°–32° / mag 7.0 parameters at 1x1 and 2x2; tune FOV range and magnitude from the results. | Sebastian + camera + sky | No |
+| Q8 | **[HW]** Does tetra3rs's `max_fov_deg` refer to the horizontal FOV (as `fov_estimate` does) or the pattern diameter? The IDS setup has a ~30° diagonal at the top of the proposed range. If solves fail near the corners, raise `max_fov_deg`. | camera + sky | No |
+| Q9 | Memory with one database loaded vs two (FOV search) on the Pi 3A+ (512 MB). | Pi | No |
 
 ---
 
 ## 10. Implementation Tasks
 
 Dependency: tasks 1–5 can be built and tested against the Python mock
-(v2 mode) without #1. Tasks marked **[HW]** need Sebastian + the IDS camera
-with the C# server from #1 (its task 7). Task 6.2 needs Q1 answered.
+(v2 mode) without #1. Tasks marked **[HW]** need Sebastian + the IDS
+camera (25 mm lens) with the C# server from #1 (its task 7).
 
 ### 1. Protocol plumbing (Python)
 - [ ] 1.1 `protocol.py`: new message ids and names. Test: pytest `type_name`.
@@ -371,29 +568,36 @@ with the C# server from #1 (its task 7). Task 6.2 needs Q1 answered.
 - [ ] 2.2 `restore_controls()` used by engine startup and recovery. Test: pytest order and unit filtering.
 
 ### 3. Config profiles
-- [ ] 3.1 `DEFAULT_CONFIG` additions, profile helpers in `ConfigManager`, `CONFIG_VERSION` unchanged. Test: pytest load of an old config file keeps all values.
+- [ ] 3.1 `DEFAULT_CONFIG` additions (incl. `camera.last_camera_key`), profile helpers in `ConfigManager`, `CONFIG_VERSION` unchanged. Test: pytest load of an old config file keeps all values.
 - [ ] 3.2 First-run defaults and legacy migration. Test: pytest.
 - [ ] 3.3 `calibration.camera_key` and `has_calibration` check. Test: pytest.
 
-### 4. Geometry and FOV
-- [ ] 4.1 `PlateSolver.solve_frame(fov_estimate_deg=...)`; engine passes the profile FOV. Test: pytest on `tests/samples` unchanged results.
+### 4. Geometry, FOV and solver databases
+- [ ] 4.1 `PlateSolver.solve_frame(fov_estimate_deg, fov_max_error_deg)`; remove `_FOV_DEG`/`_FOV_MAX_ERROR_DEG`; `SolverParams` snapshot from the active profile (§5.3). Test: pytest on `tests/samples`, unchanged results at 8.86° / 1.5°.
 - [ ] 4.2 SolverThread drops mismatched-size results without counting failures. Test: pytest.
-- [ ] 4.3 FOV learning (median of 5 `fov_deg`), never overwrite `"user"`. Test: pytest with fake results.
-- [ ] 4.4 Web server: dynamic `image_w/h`, `fov_h_deg`, origin/projection parameters. Test: pytest payload tests at 1280x720 and 968x608.
-- [ ] 4.5 FOV outside 7°–10° warning (log + state flag). Test: pytest.
+- [ ] 4.3 FOV learning (median of 5 `fov_deg`), never overwrite `"user"`, keep inside the active database's range minus 5 %, max 10 % per step. Test: pytest with fake results incl. outliers.
+- [ ] 4.4 Parameterise `scripts/build_tetra3rs_catalog.py` (`--db narrow|wide|all`, `--force`, `data/solver_dbs.json`); build and commit `data/tetra3rs_gaia_wide.bin` (18°–32°, mag 7.0); `VERSION.json` `solver_db_version_wide`. Test: script rebuilds the narrow DB byte-identical (or same counts) and writes the JSON; `bench_solvers.py --db wide` runs.
+- [ ] 4.5 `paths.solver_db_dir()` and the database registry/selection (§5.4.3), one database loaded at a time, swap on the solver thread. Test: pytest (dev/release/headless paths; selection cases; swap without dropping the solver thread).
+- [ ] 4.6 FOV search for profiles without a FOV (§5.4.4) + UI state. Test: pytest with a fake solver that only solves on one database.
+- [ ] 4.7 Ship the wide DB: `build_mac.sh`, `build_linux.sh`, `build_windows.bat`, `build_headless_deb.sh` copy it; `scripts/smoke_test_headless_deb.sh` checks it exists. Test: local Windows build + headless smoke test show both files.
+- [ ] 4.8 **[INFRA]** `build.yml` "Verify required files" (4 jobs) lists `data/tetra3rs_gaia_wide.bin`. Test: `workflow_dispatch` build green.
+- [ ] 4.9 Web server: dynamic `image_w/h`, `fov_h_deg`, `fov_source`, `solver_db`, `fov_out_of_range`; origin/projection parameters. Test: pytest payload tests at 1280x720 / 8.86° and 968x608 / 25.6°.
+- [ ] 4.10 Overlay marker scaling by `image_w / 1280` (NavOverlay, SyncCandidatesOverlay, StarOverlay) and a 1936x1216 / 25.6° Wizard test fixture. Test: vitest.
+- [ ] 4.11 Measure RSS with the narrow DB, the wide DB, and both, on the dev laptop and the Pi 3A+ (Q9). Test: numbers in the PR.
 
 ### 5. API and UI
 - [ ] 5.1 `/api/control` number + validation; `/ws` additions. Test: pytest API tests.
 - [ ] 5.2 `types.ts` + `CameraControls.tsx` int/float/enum, log slider, unit labels, reconfiguring state. Test: vitest.
-- [ ] 5.3 Settings: camera info, FOV + source, focal-length field. Test: vitest + manual against the mock.
+- [ ] 5.3 Settings: camera info, FOV + source + active database, focal-length field, out-of-range hint. Test: vitest + manual against the mock.
 - [ ] 5.4 Manual UI check on desktop window and phone (LAN) against the mock in v2 mode. Test: screenshots in the PR.
 
-### 6. Hardware verification
+### 6. Hardware verification (IDS UI-306xCP-M + 25 mm Basler lens)
 - [ ] 6.1 **[HW]** IDS v2 session: all four controls appear with real ranges; exposure > frame interval lowers fps; CONTROL_INFO ranges update in the UI.
-- [ ] 6.2 **[HW]** Binning 1x1 <-> 2x2 while TRACKING: image switches to 968x608 without reconnect, overlays line up, pointing continues (needs Q1 lens in range).
-- [ ] 6.3 **[HW]** Night test: solve rate at 1x1 and 2x2, several exposures; check centroid params (Q6).
-- [ ] 6.4 **[HW]** Restart the app: IDS settings restored from its profile; plug the OV9281 (C server, v1): its own profile, no unit mix-up.
-- [ ] 6.5 **[HW]** 4 s exposure: no stall-restart loop.
+- [ ] 6.2 **[HW]** Binning 1x1 <-> 2x2 while TRACKING: image switches to 968x608 without reconnect, overlays line up, pointing continues; calibration (`_CALIBRATE_STABLE_TOL` 0.05°) still completes at 2x2.
+- [ ] 6.3 **[HW]** Night test with the wide DB: solve rate, solve time and probability at 1x1 (~48"/px) and 2x2 (~97"/px) across several exposures and sky regions (incl. one near a galactic pole); check centroid params (Q6); tune DB FOV range and magnitude (Q7, Q8). Save a few frames as new `tests/samples` wide-field fixtures.
+- [ ] 6.4 **[HW]** Fresh profile without a focal length: FOV search finds ~25.6° and switches to the wide DB; then with 25 mm entered: no search.
+- [ ] 6.5 **[HW]** Restart the app: IDS settings and FOV restored from its profile, wide DB loaded at startup; plug the OV9281 (C server, v1): its own profile, narrow DB, no unit mix-up.
+- [ ] 6.6 **[HW]** 4 s exposure: no stall-restart loop.
 
 ### 7. Docs
-- [ ] 7.1 `SPEC_ARCHITECTURE.md` §5/§7/§8/§13 notes (stream geometry, stall timeout, FOV per profile, config keys) and `docs/` user notes on camera controls, when this lands. Test: review.
+- [ ] 7.1 `SPEC_ARCHITECTURE.md` §5/§7/§8 (stream geometry, stall timeout, per-profile FOV replacing the fixed §8.1 optics, both databases), §13 config keys, `SPEC_BUILD_RELEASE.md` (both DB files), `CLAUDE.md` catalog section, and `docs/` user notes on camera controls and lens/FOV, when this lands. Test: review.

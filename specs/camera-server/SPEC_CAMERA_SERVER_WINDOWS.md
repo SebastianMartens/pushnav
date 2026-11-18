@@ -1,6 +1,6 @@
 # SPEC_CAMERA_SERVER_WINDOWS.md — PushNav
 
-Version: 1.0
+Version: 1.1 (2026-11-18: 25 mm reference lens, wide-field solver database)
 Status: Draft — awaiting approval, not yet implemented
 Date: 2026-11-18
 Target: Windows 10/11 x64
@@ -80,6 +80,14 @@ A read-only probe (scratch .NET 10 program using the installed
 | Long exposure | supported, 0.092 ms – **30 s** |
 | Gain | master gain only, scaled 0–100 (factor 100 = 1.0x), gain boost supported |
 | USB | bus speed flag `0x8` (USB 3.0) |
+
+**Reference configuration** (Sebastian's setup): this camera with a
+**25 mm Basler lens**. Sensor 11.35 x 7.13 mm → FOV **25.6° x 16.2°**
+(~30° diagonal), **48.3"/px** at 1x1 and **96.7"/px** at 2x2. Binning
+does not change the FOV. The shipped tetra3rs database (7°–10°) cannot
+solve this field; `SPEC_CAMERA_CONTROLS.md` §5.2–§5.4 adds a wide-field
+database and per-profile FOV. That is engine work under #3; the camera
+server only reports the sensor size and pixel pitch (HELLO `capabilities.sensor`).
 
 Consequences:
 
@@ -554,17 +562,32 @@ SDK pinned in `camera/windows-dotnet/global.json` (10.0.x,
 
 ### 10.3 GitHub Actions (infra)
 
-- New workflow `.github/workflows/camera-server-windows.yml` on
-  `windows-latest`, triggered on PRs/pushes touching `camera/windows-dotnet/**`,
-  `tests/test_camera_conformance.py`, `tests/mock_camera_server.py`,
-  `python/evf/camera/**`: setup-dotnet 10, `dotnet test`, AOT publish,
-  then `uv run pytest tests/test_camera_conformance.py` with
-  `PUSHNAV_CONFORMANCE_SERVER` pointing at the exe. Upload the exe as an
-  artifact.
+The repo already has a PR test workflow, `.github/workflows/test.yml`
+(jobs `python` on ubuntu + windows, and `web`; runs on every PR to `main`,
+on pushes to `main`, and on `workflow_dispatch`). Extend it rather than
+adding a new workflow:
+
+- New job `camera-server-windows` in `test.yml` on `windows-latest`
+  (timeout ~20 min):
+  1. `actions/checkout`, `actions/setup-dotnet` (10.0.x, from
+     `camera/windows-dotnet/global.json`), NuGet cache.
+  2. `ilammy/msvc-dev-cmd` (the Native AOT linker needs MSVC).
+  3. `dotnet test camera/windows-dotnet` (xUnit).
+  4. AOT publish -> `camera_server_dotnet.exe`; fail on any AOT/trim warning.
+  5. `astral-sh/setup-uv` + `uv sync --locked --no-group desktop` (same as
+     the `python` job), then
+     `uv run --no-sync pytest tests/test_camera_conformance.py -q` with
+     `PUSHNAV_CONFORMANCE_SERVER` set to the exe (Fake backend).
+  6. Upload the exe as an artifact (7-day retention).
+- Runs on every PR like the other jobs, with no `paths` filter: the
+  workflow has no filters today, and the job is cheap. If it gets slow,
+  add a `dorny/paths-filter` step later. Don't use workflow-level `paths`,
+  because it would skip the Python and web jobs too.
+- The existing `python` job (windows) runs the conformance suite against
+  the Python mock only, since `PUSHNAV_CONFORMANCE_SERVER` is unset there.
 - `build.yml` `build-windows` job: add `actions/setup-dotnet` (10.0.x)
   before "Build zip + installer". The existing MSVC step stays (needed by
   both the C server and the AOT linker).
-- Note: the repo has no PR test workflow today; this is the first one.
 
 ---
 
@@ -574,7 +597,7 @@ SDK pinned in `camera/windows-dotnet/global.json` (10.0.x,
 |---|---|---|---|
 | Q1 | Is this UI-306xCP-M a "Rev. 2" unit supported by IDS peak's uEye transport layer? Only matters if the uEye API path fails. Check the label/revision and, optionally, install IDS peak and see if `ids_peak_cockpit` lists it. | Sebastian + camera | No (fallback only) |
 | Q2 | uEye headers/manual are not installed (`develop/` has only `bin/`). Install the IDS SDK developer option (headers + manual) on the dev box, or accept constants derived from the API docs? | Sebastian | No |
-| Q3 | Lens / focal length used with the IDS camera. The shipped tetra3rs database solves only 7°–10° FOV, i.e. about 65–93 mm on the IMX174. See `SPEC_CAMERA_CONTROLS.md` §5.2. | Sebastian | **Yes for #3 solving**, no for #1 streaming |
+| Q3 | ~~Lens / focal length~~ **Resolved:** 25 mm Basler lens (reference configuration, §2). Follow-up [HW] checks (solve rate/time with the wide database, centroid parameters at ~48/97"/px) are tracked in `SPEC_CAMERA_CONTROLS.md` §9 Q6–Q8. | — | No |
 | Q4 | Is q90 grayscale JPEG good enough for solving faint fields with the IMX174, or do we need FRAME_RAW soon? Compare solve rate on a real sky session (JPEG vs raw dump). | Sebastian + camera + sky | No |
 | Q5 | Max exposure to offer in the UI: the sensor allows 30 s; plate solving rarely needs > 2 s, and long frames make the UI sluggish. Proposed cap: 4 s, configurable. | Sebastian | No (default proposed) |
 | Q6 | Do the OV9281 modules support `KSPROPERTY_CAMERACONTROL_EXTENDED_EXPOSUREMODE` (µs exposure) under the inbox UVC driver, or only log2 steps? | Sebastian + OV9281 module | No |
@@ -620,14 +643,14 @@ camera. **[INFRA]** = route to the infra agent.
 - [ ] 5.6 Device removal -> exit(1); engine recovers when re-plugged. Test **[HW]**: unplug/replug during streaming.
 - [ ] 5.7 Fallback rule exit code 3 when no IDS camera present. Test: xUnit + manual without camera.
 - [ ] 5.8 Kill/respawn without `is_ExitCamera` (Q7). Test **[HW]**: `taskkill /F` then restart, camera opens.
-- [ ] 5.9 Night test: plate solve with the IDS camera, at least one target tracked. Test **[HW]** + sky + Q3 answered.
+- [ ] 5.9 Night test: plate solve with the IDS camera (25 mm lens), at least one target tracked. Needs the wide solver database and per-profile FOV from `SPEC_CAMERA_CONTROLS.md` tasks 4.1–4.5. Test **[HW]** + sky.
 
 ### 6. Engine, build, packaging
 - [ ] 6.1 `paths.camera_binaries()`, `camera.windows_server` config key, `PUSHNAV_CAMERA_SERVER` env. Test: pytest (`tests/test_paths_*.py` style) for order and overrides.
 - [ ] 6.2 `SubprocessManager`: exit-code-3 fallback within one attempt, remember working binary, kill both names. Test: pytest with two fake server scripts (one exits 3).
 - [ ] 6.3 `build_windows.bat` Phase 1a + copy into release dir (`pushnav.iss` needs no change). Test: local build produces zip/installer containing both exes.
 - [ ] 6.4 Docs: `docs/hardware.md` IDS section (install IDS Software Suite, supported model), `SPEC_BUILD_RELEASE.md` §6.1 line, `CLAUDE.md` build line. Test: review.
-- [ ] 6.5 **[INFRA]** `camera-server-windows.yml` workflow (test, AOT publish, conformance, artifact). Test: workflow green on the PR.
+- [ ] 6.5 **[INFRA]** Add job `camera-server-windows` to `.github/workflows/test.yml` (xUnit, AOT publish, conformance against the exe, artifact; §10.3). Test: job green on the PR; existing `python`/`web` jobs unchanged.
 - [ ] 6.6 **[INFRA]** `build.yml` add setup-dotnet to `build-windows`. Test: `workflow_dispatch` with platform=windows produces the installer with both exes.
 
 ### 7. Protocol v2 in the server (after #3 approval)
