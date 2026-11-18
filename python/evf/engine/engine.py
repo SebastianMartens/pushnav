@@ -21,6 +21,7 @@ Per SPEC_ARCHITECTURE.md and impl0.md §Phase 8.
 Central coordinator that owns the lifecycle of every subsystem.
 """
 
+import errno
 import io
 import json
 import logging
@@ -98,6 +99,25 @@ def _usb_video_device_present() -> bool:
     return False
 
 
+# bind() errors that mean "something else already owns this port". Windows
+# reports WSAEADDRINUSE (10048), or WSAEACCES (10013) when SO_REUSEADDR is set
+# on a port another socket holds exclusively.
+_PORT_BUSY_ERRNOS = {errno.EADDRINUSE, 10048, 10013}
+
+
+def server_error_message(what: str, port: int, exc: BaseException) -> str:
+    """User-facing text for an integration server that failed to start.
+
+    `what` names the affected clients, e.g. "Stellarium". The result is
+    shown in the UI's server-error banner.
+    """
+    if isinstance(exc, OSError) and (
+        exc.errno in _PORT_BUSY_ERRNOS or getattr(exc, "winerror", None) in _PORT_BUSY_ERRNOS
+    ):
+        return f"{what} can't connect: port {port} is in use by another application."
+    return f"{what} can't connect: PushNav could not listen on port {port} ({exc})."
+
+
 class Engine:
     """Central coordinator that owns all components and manages their lifecycle.
 
@@ -142,6 +162,10 @@ class Engine:
         self._stellarium: StellariumServer | None = None
         self._lx200: Lx200Server | None = None
         self._webserver: WebServer | None = None
+        # Start-up failures of the non-fatal servers (Stellarium, LX200),
+        # e.g. port already in use. Shown as a banner in the UI via /ws.
+        self._server_errors_lock = threading.Lock()
+        self._server_errors: list[dict] = []
 
         # Sync state (two-phase calibration)
         self._sync_lock = threading.Lock()
@@ -177,6 +201,26 @@ class Engine:
     @property
     def dev_mode(self) -> bool:
         return self._dev_mode
+
+    @property
+    def server_errors(self) -> list[dict]:
+        """Snapshot of failed server start-ups: [{"server", "port", "message"}]."""
+        with self._server_errors_lock:
+            return [dict(e) for e in self._server_errors]
+
+    def _add_server_error(
+        self, server: str, what: str, port: int, exc: BaseException
+    ) -> None:
+        """Record that `server` failed to start (replaces an earlier entry)."""
+        with self._server_errors_lock:
+            self._server_errors = [
+                e for e in self._server_errors if e["server"] != server
+            ]
+            self._server_errors.append({
+                "server": server,
+                "port": port,
+                "message": server_error_message(what, port, exc),
+            })
 
     @property
     def sample_injector(self) -> SampleInjector:
@@ -438,6 +482,10 @@ class Engine:
             self._stellarium.start()
         except Exception as exc:
             logger.error("Failed to start Stellarium server: %s", exc)
+            if self._stellarium is not None:
+                self._add_server_error(
+                    "stellarium", "Stellarium", self._stellarium.port, exc
+                )
             self._stellarium = None
 
     def startup_lx200(self) -> None:
@@ -458,6 +506,10 @@ class Engine:
             self._lx200.start()
         except Exception as exc:
             logger.error("Failed to start LX200 server: %s", exc)
+            if self._lx200 is not None:
+                self._add_server_error(
+                    "lx200", "SkySafari / LX200 clients", self._lx200.port, exc
+                )
             self._lx200 = None
 
     def startup_webserver(self) -> None:
@@ -471,6 +523,7 @@ class Engine:
                 on_client_connected=self._flash_status_led,
                 frame_buffer=self._frame_buffer,
                 stellarium_object=lambda: self.stellarium_object,
+                server_errors=lambda: self.server_errors,
                 camera_controls=lambda: self.camera_controls,
                 sync_state=lambda: {
                     "in_progress": self.sync_in_progress,

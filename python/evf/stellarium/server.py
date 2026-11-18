@@ -114,8 +114,15 @@ class StellariumServer:
         self._stop_event.clear()
         self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server_sock.bind((self._host, self._port))
-        self._server_sock.listen(5)
+        try:
+            self._server_sock.bind((self._host, self._port))
+            self._server_sock.listen(5)
+        except OSError:
+            # Don't keep a half-open socket: `port` would report the
+            # unbound socket's port 0 instead of the requested one.
+            self._server_sock.close()
+            self._server_sock = None
+            raise
         self._server_sock.setblocking(False)
         logger.info("Stellarium server listening on %s:%d", self._host, self._port)
 

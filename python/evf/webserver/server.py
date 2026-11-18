@@ -148,6 +148,7 @@ class WebServer:
         frame_buffer: LatestFrame | None = None,
         solver_failures: Callable[[], int] | None = None,
         stellarium_object: Callable[[], dict | None] | None = None,
+        server_errors: Callable[[], list[dict]] | None = None,
         camera_controls: Callable[[], list[dict] | None] | None = None,
         sync_state: Callable[[], dict] | None = None,
         activity: Callable[[], dict] | None = None,
@@ -165,6 +166,7 @@ class WebServer:
         self._frame_buffer = frame_buffer
         self._solver_failures = solver_failures
         self._stellarium_object = stellarium_object
+        self._server_errors = server_errors
         self._camera_controls = camera_controls
         self._sync_state = sync_state
         self._activity = activity
@@ -641,6 +643,8 @@ class WebServer:
             "sample_active": (
                 self._sample_active() if self._sample_active else None
             ),
+            # Stellarium/LX200 servers that failed to start (e.g. port in use)
+            "server_errors": self._server_errors() if self._server_errors else [],
         }
 
     def _build_nav(self, snap, target, origin_x, origin_y, dx_off, dy_off) -> dict | None:
