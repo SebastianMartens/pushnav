@@ -1,0 +1,645 @@
+# SPEC_CAMERA_SERVER_WINDOWS.md — PushNav
+
+Version: 1.0
+Status: Draft — awaiting approval, not yet implemented
+Date: 2026-11-18
+Target: Windows 10/11 x64
+Issue: SebastianMartens/pushnav#1 (IDS uEye UI-306xCP-M support)
+Related: #3 (camera controls; see `SPEC_CAMERA_CONTROLS.md` and
+`specs/start/SPEC_PROTOCOL_CAMERA.md` §11, protocol v2)
+Baseline: `specs/start/SPEC_ARCHITECTURE.md` v2.0, `SPEC_PROTOCOL_CAMERA.md`
+doc 2.1 / wire v1, `SPEC_BUILD_RELEASE.md` v2.1
+
+---
+
+## 1. Overview
+
+PushNav's Windows camera server today is `camera/windows/camera_server.c`
+(C / DirectShow). It only accepts allowlisted OV9281 UVC modules, negotiates
+a fixed 1280x720 MJPG/YUY2 stream, and reaches exposure/gain through
+`IAMCameraControl` / `IAMVideoProcAmp`.
+
+This spec adds a **new** Windows camera server written in **C# / .NET 10**,
+published as a **Native AOT single-file exe**. It speaks the existing camera
+TCP protocol (`SPEC_PROTOCOL_CAMERA.md`), so the Python engine does not care
+which server is running. Inside the server, pluggable **backends** drive
+the actual hardware:
+
+1. **IDS backend** (first; the goal of #1): IDS uEye UI-306xCP-M, USB
+   VID `1409` / PID `3060`, mono, Sony IMX174, 1936x1216.
+2. **UVC backend** via Media Foundation: replaces the C/DirectShow server
+   for the OV9281 allowlist (Waveshare / Arducam / DECXIN).
+3. **Later**: astronomy-camera SDKs (ZWO, QHY, ...) or ASCOM. Room is left
+   in the backend interface (§4); not specified here.
+
+The C/DirectShow server stays in the build as a **fallback** until the C#
+server reaches parity for UVC webcams (§8), then it is retired.
+
+What does **not** change:
+
+- Architecture rule: the camera server is a separate OS process talking TCP
+  on `127.0.0.1:8764` (`SPEC_ARCHITECTURE.md` §1.6, §7).
+- Exit semantics: the server `exit(1)`s on device disconnect / fatal capture
+  error, and `SubprocessManager` runs its 5-attempt backoff (1, 2, 4, 8, 15 s).
+- The macOS (Swift) and Linux (C/V4L2) servers and the Python engine's
+  frame path (JPEG in, `LatestFrame`, solver thread).
+
+### 1.1 Terms
+
+| Term | Meaning |
+|---|---|
+| **Camera server** | The native process that owns the camera and serves the camera TCP protocol. One per platform; on Windows there are two during the transition (C# and C). |
+| **Backend** | A class inside the C# camera server that knows one family of cameras (IDS, UVC, Fake, ...). It probes for devices, opens one, produces frames, and exposes controls. |
+| **Quirk** | A small per-camera-model class that adjusts a backend's defaults (formats, control mapping, ranges) for one VID/PID. Replaces `#ifdef`s and special cases in the backend. |
+| **Control** | A camera setting the app can read and change over the protocol (`exposure`, `gain`, `fps`, `binning`). Described by a control descriptor in CONTROL_INFO. |
+| **Capability** | What a backend says it supports for the opened camera: which controls, their real ranges, frame formats. Sent in HELLO / CONTROL_INFO (protocol v2). |
+| **Binning** | Combining NxN sensor pixels into one output pixel. Changes the frame size (1936x1216 at 1x1, 968x608 at 2x2 on the UI-306xCP-M). |
+| **Frame interval** | Time between two frames (1/fps). Upper bound for exposure on most cameras. |
+| **Stream geometry** | Width, height, binning and pixel format of the frames currently being sent. Changes when binning changes. |
+| **Fake backend** | A backend with no hardware that replays sample images and simulates controls, for tests and CI. |
+
+---
+
+## 2. Hardware Findings (verified 2026-11-18)
+
+A read-only probe (scratch .NET 10 program using the installed
+`uEyeDotNet.dll`, not committed) ran against the attached camera:
+
+| Item | Value |
+|---|---|
+| PnP instance | `USB\VID_1409&PID_3060\4102825084`, device class **USB** (not Camera/Image) |
+| Driver | `oem147.inf` (IDS `ueye_usb_64.sys`), IDS Software Suite **4.97** (`ueye_api_64.dll` 4.97.4111) |
+| Sensor | `UI306xCP-M`, sensor id `UI1060_M` (IMX174), monochrome, **global shutter**, 5.86 µm pixels |
+| Full frame | 1936 x 1216 |
+| Default pixel format | **BGR8Packed** (must be set to `Mono8` explicitly); `Mono8`, `Mono12`, `Mono16` accepted |
+| Binning | 2x2 only (`Horizontal2X | Vertical2X`) → **968 x 608**; did not change the fps range |
+| Subsampling | 2x, 4x, 6x, 8x, 16x (not used; binning is better for SNR) |
+| Pixel clock | discrete list 30, 59, 118, 237, 474 MHz (default 118) |
+| Frame rate | 1.0 – 40.98 fps @ 118 MHz; 1.0 – 10.25 fps @ 30 MHz |
+| Exposure | 0.033 – 39.5 ms @ 118 MHz / 25 fps; 0.092 – 999.2 ms @ 30 MHz / 1 fps (bounded by frame interval) |
+| Long exposure | supported, 0.092 ms – **30 s** |
+| Gain | master gain only, scaled 0–100 (factor 100 = 1.0x), gain boost supported |
+| USB | bus speed flag `0x8` (USB 3.0) |
+
+Consequences:
+
+- The camera is **not** a UVC device. Media Foundation will not enumerate
+  it, so a native IDS backend is required (the DirectShow `uEyeCapture.ax`
+  route from the issue is not pursued; §3.1).
+- Exposure is coupled to frame interval and pixel clock. The backend owns
+  pixel clock selection (§5.4); the protocol never exposes it.
+- Exposures above 2 s collide with the engine's fixed 2.0 s frame-stall
+  timeout (`SPEC_PROTOCOL_CAMERA.md` §7). Handled in `SPEC_CAMERA_CONTROLS.md`.
+
+---
+
+## 3. Key Decisions
+
+### 3.1 IDS access path: uEye API via own P/Invoke
+
+Options considered:
+
+| Option | Status on this machine | Verdict |
+|---|---|---|
+| **uEye API** (`ueye_api_64.dll`) | Installed in `C:\Windows\System32` by the IDS driver; all needed exports present (`is_InitCamera`, `is_Exposure`, `is_SetBinning`, `is_PixelClock`, `is_SetFrameRate`, `is_GetFrameTimeRange`, `is_AllocImageMem`, `is_AddToSequence`, `is_InitImageQueue`, `is_WaitForNextImage`, `is_CaptureVideo`, `is_SetHardwareGain`, `is_EnableEvent`, ...); probe works | **Chosen** |
+| IDS peak / GenTL with uEye transport layer | Not installed (no peak, no GenTL producer, no `GENICAM_GENTL64_PATH`) | Fallback, see below |
+| DirectShow `uEyeCapture.ax` through the C server | Registered, but RGB/Y800 formats, unknown control mapping, no binning/long exposure | Rejected |
+| `uEyeDotNet.dll` wrapper | netstandard2.0, pure managed, 338 `DllImport`s into `ueye_api_64`, 3 delegate types | Reference only (§3.2) |
+
+Reasons for the uEye API: it is what the installed driver ships, it is
+verified on the real camera today, it covers all four controls (exposure
+incl. long exposure, fps, gain, binning), and it needs no extra install.
+IDS has moved new development to IDS peak, so the uEye API is in
+maintenance; this is acceptable for a camera model that is itself legacy.
+
+Fallback: an `IdsPeakBackend` (GenTL via IDS peak's C API `ids_peak_comfort_c`
+or `ids_peak` + `uEye transport layer`), only if the uEye API turns out to
+be unusable. IDS peak supports only *some* USB3 uEye CP models (Rev. 2) via
+its uEye transport layer; whether this 2015 unit qualifies is an open
+question (§11, Q1). The backend interface (§4) keeps this a drop-in.
+
+### 3.2 Interop under Native AOT
+
+- **IDS**: own `[LibraryImport("ueye_api_64")]` declarations for the ~25
+  functions used, blittable structs only, `[assembly: DisableRuntimeMarshalling]`.
+  Do **not** reference `uEyeDotNet.dll`: compiling it into our AOT exe
+  would redistribute IDS code (§3.4), it is not on NuGet (path-only
+  reference), and its reflection/trim behaviour under AOT is untested.
+  The DLL is resolved through the normal Windows search path
+  (System32, put there by the IDS driver install). If it is missing, the
+  IDS backend reports "not available" and the server falls through to the
+  next backend. Load it with `NativeLibrary.TryLoad` first so a missing
+  DLL never throws `DllNotFoundException` at probe time.
+- **Media Foundation / COM**: built-in COM interop (`[ComImport]`) is not
+  supported by Native AOT. Use **CsWin32** (`Microsoft.Windows.CsWin32`
+  source generator) for the flat MF exports (`MFStartup`,
+  `MFEnumDeviceSources`, `MFCreateSourceReaderFromMediaSource`, ...) and
+  the COM interfaces (`IMFAttributes`, `IMFActivate`, `IMFMediaSource`,
+  `IMFSourceReader`, `IMFMediaType`, `IMFSample`, `IMFMediaBuffer`,
+  `IAMCameraControl`, `IAMVideoProcAmp`, `IKsControl`), configured for
+  AOT (source-generated COM / `ComWrappers`, `allowMarshaling: false`
+  where needed). Fallback: hand-written `[GeneratedComInterface]`
+  declarations for the same small set.
+- **JPEG encoding**: Windows Imaging Component (WIC) through the same
+  CsWin32 COM path (§3.3).
+- Build must have **zero** AOT/trim warnings (`TreatWarningsAsErrors` for
+  IL2xxx/IL3xxx).
+
+### 3.3 Frame format: JPEG encoded in the server (v1 and v2 default)
+
+The C# server sends JPEG FRAME messages exactly as today
+(`SPEC_PROTOCOL_CAMERA.md` §5.1, §6.3):
+
+- UVC MJPG streams: forwarded as-is (no re-encode), like the C server.
+- IDS `Mono8` and UVC YUY2/NV12: encoded in the server as **8-bit
+  grayscale JPEG** (one component, quality 90 by default, configurable
+  via `--jpeg-quality`).
+- Encoder: **WIC** JPEG encoder (`GUID_WICPixelFormat8bppGray` input) —
+  part of Windows, no redistribution, works under AOT via CsWin32 COM.
+  Fallback if WIC is too slow: libjpeg-turbo statically linked into the
+  AOT exe (`DirectPInvoke` + `NativeLibrary` item, BSD/IJG licences).
+
+Reasons:
+
+- Zero change to the solver (`PIL.Image.open(...).convert("L")`), the
+  `LatestFrame` buffer and `/frame.mjpg` (which forwards camera JPEG bytes
+  to browsers unchanged).
+- A grayscale JPEG of a star field at q90 is roughly 150–400 KB (estimate, to be measured) vs 2.35 MB raw;
+  localhost bandwidth is not the limit, but the engine's 10 Hz MJPEG
+  fan-out and the solver's decode cost both stay as today.
+- JPEG artifacts are small compared with sensor noise for centroiding at
+  q90; this must be confirmed on real sky frames (§11, Q4).
+
+Raw frames: protocol v2 defines an optional **FRAME_RAW** (GRAY8) message
+(`SPEC_PROTOCOL_CAMERA.md` §11.6) so a later change can feed the solver
+lossless pixels. The C# server implements it behind the v2 capability;
+the engine keeps requesting JPEG until a measurement shows a solve-rate
+gain worth the extra encode for `/frame.mjpg`. Not part of this spec's
+done criteria.
+
+Performance budget: encoding 1936x1216 GRAY8 must take **≤ 15 ms** on the
+dev laptop (so ≥ 40 fps is possible); at 2x2 binning ≤ 5 ms. Measured in
+a benchmark test (task 4.3).
+
+### 3.4 Licensing and redistribution
+
+- PushNav is GPL-3.0-or-later. The C# server is GPL-3.0-or-later too.
+- No IDS file is bundled or redistributed: not `ueye_api_64.dll`, not
+  `uEyeDotNet.dll`, not headers. The user installs the **IDS Software Suite**
+  (driver + runtime). The installer and docs say so (task 6.4).
+- P/Invoke declarations are written by us against the documented uEye API
+  (function names, struct layouts, constants). Do not copy `uEye.h` into
+  the repo. Note: the installed suite has **no** `develop/include` headers
+  or manual; the implementer needs the IDS SDK headers/manual from the IDS
+  download (developer option) or derives constants from the documented
+  API (§11, Q2).
+- Runtime-loading a proprietary, user-installed driver DLL from a GPL
+  program is the same pattern as today's DirectShow/OS camera APIs; flag
+  for Sebastian, low risk (§11, Q8).
+
+### 3.5 Location and binary name
+
+- Source: `camera/windows-dotnet/`.
+- Exe: `camera_server_dotnet.exe` (the C server keeps `camera_server.exe`
+  during the transition, so both can ship side by side).
+- `SubprocessManager._kill_stale_server()` must kill **both** names on
+  Windows (it uses `taskkill /IM <name>` today).
+
+---
+
+## 4. Server Structure
+
+### 4.1 Projects
+
+```
+camera/windows-dotnet/
+  PushNav.CameraServer.slnx
+  Directory.Build.props            # net10.0-windows, Nullable, AOT analyzers, warnings as errors
+  src/PushNav.CameraServer/        # the exe (Native AOT, single file)
+    Program.cs                     # arg parsing, backend selection, exit codes
+    Protocol/                      # envelope, message types, HELLO/CONTROL_INFO JSON (System.Text.Json source-gen)
+    Server/                        # single-client TCP server + session state machine
+    Controls/                      # control descriptors, clamping, coupling helpers
+    Imaging/                       # WIC JPEG encoder, pixel conversions (YUY2/NV12 -> GRAY8)
+    Backends/
+      ICameraBackend.cs
+      Ids/                         # IdsBackend, UEyeNative (LibraryImport), quirks
+      Uvc/                         # UvcBackend (Media Foundation), quirks per VID/PID
+      Fake/                        # FakeBackend (sample images, simulated controls)
+  tests/PushNav.CameraServer.Tests/   # xUnit (protocol, controls, fake backend, encoder)
+```
+
+One exe, no plugin loading (AOT forbids it anyway). "Pluggable" means:
+backends implement one interface and are registered in a static list.
+
+### 4.2 Backend interface (sketch)
+
+```csharp
+interface ICameraBackend : IDisposable
+{
+    string Id { get; }                              // "ids", "uvc", "fake"
+    IReadOnlyList<DeviceInfo> Probe();              // cheap; never throws; [] if SDK/driver missing
+    void Open(DeviceInfo device);                   // throws CameraException on failure
+    StreamGeometry Geometry { get; }                // width, height, binning, pixel format
+    IReadOnlyList<ControlDescriptor> Controls { get; }   // real units and ranges, current values
+    ControlResult SetControl(string id, ControlValue value); // clamps; may change other controls/geometry
+    void Start(IFrameSink sink);                    // frames pushed on a backend thread
+    void Stop();
+    event Action<string> Fatal;                     // device lost / capture failure -> exit(1)
+}
+```
+
+- `DeviceInfo`: backend id, VID/PID (if USB), serial, model name, and a
+  stable **camera key** (`"<backend>:<vid>:<pid>"`, e.g. `ids:1409:3060`)
+  that the engine uses to store per-camera settings
+  (`SPEC_CAMERA_CONTROLS.md` §4).
+- `IFrameSink.OnFrame(ReadOnlySpan<byte> data, FrameKind kind, StreamGeometry g)`:
+  the server keeps **only the latest frame** (single-slot, overwrite — same
+  "no frame queues" rule as the engine) and the TCP writer thread sends it.
+  A slow client never builds a backlog.
+- Quirks: `IUvcQuirk` / `IIdsQuirk` with `Matches(DeviceInfo)` and hooks
+  such as `PreferredFormats`, `MapExposure`, `DefaultControls`. One small
+  class per camera model; the OV9281 modules start with one shared quirk.
+
+### 4.3 Backend selection
+
+At startup the server probes registered backends in order
+**IDS → UVC** (Fake only with `--backend fake`):
+
+1. If `--backend <id>` is given, only that backend is probed.
+2. Else the first backend whose `Probe()` returns a device wins; within a
+   backend the first allowlisted device wins.
+3. Device wait: like the C server, retry probing for up to 8 s
+   (500 ms steps) before giving up.
+4. No device: send nothing (no client yet), print the devices seen
+   (VID:PID + name, like the C server's diagnostic) to stderr and exit
+   with **code 3** (`NO_SUPPORTED_CAMERA`). Code 1 stays "fatal / device
+   lost". The engine uses code 3 for the fallback in §8.
+
+The allowlist for UVC is the same as the C server (built-ins +
+`PUSHNAV_CAMERA_IDS` env var, which `SubprocessManager._build_env()`
+already injects from `camera.extra_camera_ids`). The IDS backend accepts
+any camera the uEye API reports (`is_GetCameraList`), with a quirk for
+`1409:3060`; other IDS models work with generic defaults.
+
+### 4.4 Command line
+
+| Flag | Meaning |
+|---|---|
+| `--port <n>` | TCP port (default 8764) |
+| `--backend ids\|uvc\|fake` | force a backend |
+| `--fake-images <dir>` | images for the Fake backend (default: none -> synthetic star field) |
+| `--list` | print detected devices + capabilities as JSON and exit 0 (diagnostics; used by tests and the issue's "dump the caps" step) |
+| `--jpeg-quality <1-100>` | default 90 |
+| `--log-level debug\|info` | stderr logging |
+
+No command-line flag for anything the user tunes at runtime (that goes
+through protocol controls and config, as `SPEC_PROTOCOL_CAMERA.md` §7 asks).
+
+### 4.5 Threads and lifecycle
+
+- Main thread: arg parsing, probe, open, then the TCP accept loop.
+- Backend capture thread (IDS: `is_WaitForNextImage` loop; UVC: source
+  reader `ReadSample` loop) pushes into the latest-frame slot.
+- Session thread: reads client messages (HELLO, SET_CONTROL,
+  GET_CONTROLS, unknown types ignored) and writes CONTROL_INFO / ERROR.
+- Writer: sends the latest frame when a new one is present. All socket
+  writes are serialized with one lock.
+- Single client, exit after disconnect — same as the C and Swift servers
+  (the engine respawns it).
+- Ctrl+C / Ctrl+Break / `CTRL_CLOSE_EVENT` and `process.terminate()` from
+  Python (TerminateProcess on Windows) must leave the camera usable for the
+  next spawn: the IDS backend calls `is_ExitCamera` in a finally / console
+  handler; a hard kill is tolerated because the uEye driver frees the
+  handle when the process dies (verify, task 5.8).
+
+---
+
+## 5. IDS Backend
+
+### 5.1 Open sequence
+
+1. `NativeLibrary.TryLoad("ueye_api_64.dll")`; missing -> backend unavailable.
+2. `is_GetNumberOfCameras` / `is_GetCameraList` -> `DeviceInfo` list
+   (model, serial, device id; VID/PID from the quirk table by model).
+3. `is_InitCamera(&hCam, NULL)` for the chosen device id.
+4. `is_SetColorMode(IS_CM_MONO8)` (default is BGR8 — verified).
+5. `is_SetDisplayMode(IS_SET_DM_DIB)`; turn off all auto features
+   (`is_SetAutoParameter`: auto shutter, auto gain, auto frame rate) — this
+   is the IDS equivalent of `SPEC_PROTOCOL_CAMERA.md` §6.1 "force auto
+   exposure OFF".
+6. Apply the initial geometry (binning 1x1, full AOI) and the pixel clock
+   for the initial fps (§5.4).
+7. Allocate a ring of 4 image buffers (`is_AllocImageMem` + `is_AddToSequence`),
+   `is_InitImageQueue`, `is_CaptureVideo(IS_DONT_WAIT)`.
+8. Enable the device-removal event (`is_EnableEvent(IS_SET_EVENT_REMOVE)`)
+   and watch it on a thread; on removal -> `Fatal` -> `exit(1)`.
+
+### 5.2 Capture loop
+
+`is_WaitForNextImage(timeout = max(1 s, 2 x frame interval + exposure))`,
+copy the buffer (stride from `is_GetImageMemPitch`) into a pooled GRAY8
+array, `is_UnlockSeqBuf`, JPEG-encode, push to the sink. Three consecutive
+timeouts with no removal event -> ERROR message + `exit(1)`.
+
+### 5.3 Controls advertised
+
+| Control | Source | Range on UI-306xCP-M |
+|---|---|---|
+| `exposure` (µs) | `is_Exposure` (`GET_EXPOSURE_RANGE`, `SET_EXPOSURE`); long-exposure mode switched on transparently above the normal max | 92 µs – 30 s (capped, see §11 Q5) |
+| `fps` | `is_SetFrameRate`, `is_GetFrameTimeRange` | 1.0 – 41 fps (depends on pixel clock) |
+| `gain` | `is_SetHardwareGain` master (0–100 scaled) | 0 – 100 |
+| `binning` | `is_SetBinning` (`IS_GET_SUPPORTED_BINNING` decides the options) | `1`, `2` |
+
+Descriptor format, units and coupling rules: `SPEC_PROTOCOL_CAMERA.md`
+§11.4 (v2). With a **v1** client the IDS backend advertises only
+`exposure` and `gain`, with exposure in unit `"100us"` (int) so today's UI
+formats it correctly, and keeps 1x1 binning (§7).
+
+Gain boost (`is_SetGainBoost`) is off and not exposed in this spec.
+
+### 5.4 Pixel clock and frame-rate policy
+
+The protocol never exposes pixel clock. The backend picks it:
+
+- For a requested fps, choose the **lowest** pixel clock from
+  `IS_PIXELCLOCK_CMD_GET_LIST` whose max fps ≥ requested fps. Lower clock =
+  longer max frame time = longer max exposure (verified: 999 ms @ 30 MHz
+  vs 39.5 ms @ 118 MHz).
+- After any change in clock / fps / exposure, re-read all ranges and send
+  CONTROL_INFO (v2 coupling rule).
+- Exposure priority: if `exposure` is set above the current frame
+  interval, the backend lowers fps (and pixel clock if needed) so the
+  exposure fits, instead of clamping the exposure. If exposure exceeds the
+  normal range at minimum fps (1 fps), long-exposure mode is enabled.
+
+### 5.5 Binning change (stream restart in-process)
+
+Binning needs new image buffers, so the backend does an in-process
+restart: `is_StopLiveVideo` -> free sequence -> `is_SetBinning` -> AOI
+re-read -> allocate -> `is_CaptureVideo`. Target < 500 ms. The TCP
+connection stays open. The server then sends **STREAM_INFO** (v2) with the
+new geometry before the first frame of the new size (protocol §11.5).
+The engine side is in `SPEC_CAMERA_CONTROLS.md` §5.
+
+---
+
+## 6. UVC Backend (Media Foundation)
+
+Purpose: replace `camera_server.c` for the OV9281 modules and other
+allowlisted UVC cameras.
+
+- Enumerate with `MFEnumDeviceSources(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID)`;
+  read `MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK`
+  (contains `vid_XXXX&pid_XXXX`) and match the allowlist (same rules as
+  `find_device()` in the C server).
+- Open with `IMFSourceReader` (no topology, no window). Choose the native
+  media type: prefer **MJPG** at the largest allowlisted size the quirk
+  allows (1280x720 for the OV9281 quirk, same as today), else YUY2/NV12
+  (converted to GRAY8 and JPEG-encoded — this closes the C server's
+  "YUYV needs libjpeg" gap).
+- fps: pick the native type's **lowest** frame rate by default (keeps
+  upstream issue #26 behaviour: max exposure headroom). With a v2 client,
+  `fps` is advertised as an **enum** of the frame rates the device
+  offers for the chosen size; changing it re-selects the media type
+  (in-process restart, STREAM_INFO).
+- Exposure/gain: `QueryInterface` the media source for `IAMCameraControl`
+  (exposure, log2 seconds) and `IAMVideoProcAmp` (gain). Set exposure to
+  manual at open (`SPEC_PROTOCOL_CAMERA.md` §6.1).
+  - v1 client: advertise exactly what the C server advertises today
+    (exposure unit `"log2s"`, gain `"raw"`), so behaviour is identical.
+  - v2 client: exposure is advertised in µs. Preferred source is the
+    extended control `KSPROPERTY_CAMERACONTROL_EXTENDED_EXPOSUREMODE`
+    (100 ns units) via `IKsControl` if the driver supports it; otherwise
+    an **enum** control whose options are the log2 steps converted to µs
+    (e.g. 15 625, 31 250, 62 500 µs ...). Which one the OV9281 modules
+    support must be checked on hardware (§11, Q6).
+- Binning: not advertised for UVC (no standard UVC control).
+- Device loss: `MF_E_HW_MFT_FAILED_START_STREAMING` / `MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED`
+  or `ReadSample` stream-tick/error flags -> `Fatal` -> `exit(1)`.
+- HELLO `backend` value: `"windows-dotnet-mf"` (C server: `"windows-directshow"`).
+
+Parity definition (gate for retiring the C server, §8): on each of the
+three OV9281 modules the UVC backend must (a) be found with the same
+allowlist, (b) stream 1280x720 MJPG at the lowest fps, (c) disable auto
+exposure and apply exposure/gain with v1 units, (d) exit(1) within 2 s of
+unplugging, (e) pass the protocol conformance suite (§9.2).
+
+---
+
+## 7. Protocol Support
+
+- The C# server implements wire **v1** exactly (`SPEC_PROTOCOL_CAMERA.md`
+  §1–§9) and **v2** (`SPEC_PROTOCOL_CAMERA.md` §11). It negotiates per
+  the v2 handshake rules: an old (v1) engine keeps working.
+- Fixes known v1 gaps in its own implementation: unknown message types are
+  ignored (§3), JSON is parsed with a real parser (System.Text.Json
+  source generator), HELLO carries the real stream size instead of a
+  hardcoded 1280x720.
+- HELLO fields for the C# server: `backend` = `"windows-dotnet-ids"` /
+  `"windows-dotnet-mf"` / `"windows-dotnet-fake"`, `backend_version` from the
+  assembly version, `camera_model` = model string (`"UI306xCP-M"`).
+
+---
+
+## 8. Engine Integration and Switch-Over
+
+### 8.1 Binary resolution (`evf/paths.py`)
+
+New function `camera_binaries() -> list[Path]` returns the Windows servers
+in preference order; `camera_binary()` stays for macOS/Linux and returns
+the first entry on Windows.
+
+| Mode | Order |
+|---|---|
+| Windows release | `<root>/camera_server_dotnet.exe`, `<root>/camera_server.exe` |
+| Windows dev | `camera/windows-dotnet/publish/camera_server_dotnet.exe`, `camera/windows/camera_server.exe` |
+
+Missing files are skipped. Override: config `camera.windows_server` =
+`"auto"` (default) | `"dotnet"` | `"directshow"`, and env var
+`PUSHNAV_CAMERA_SERVER` with the same values (env wins; for debugging).
+
+### 8.2 Fallback rule (`SubprocessManager`)
+
+Phase A — C# server has IDS (+ Fake) only, UVC not at parity:
+
+1. Spawn the first binary (C#).
+2. If it exits with code **3** (no supported camera) before the
+   handshake, spawn the next binary (C server) in the **same** attempt —
+   this does not consume a backoff step.
+3. Any other failure follows the existing backoff unchanged.
+4. Remember which binary worked; recovery attempts start with it.
+5. Log at INFO which server and backend are in use (from HELLO).
+
+Phase B — UVC backend lands but is not yet at parity: the UVC backend is
+compiled in but **off by default** (`--backend` list excludes it unless
+`camera.windows_server = "dotnet"` or `PUSHNAV_CAMERA_SERVER=dotnet`),
+so OV9281 users keep getting the C server through rule 2.
+
+Phase C — parity reached (§6 gate signed off by Sebastian): UVC backend on
+by default, then in a separate change remove `camera/windows/`, the
+second binary entry, the MSVC step in `build_windows.bat` and
+`ilammy/msvc-dev-cmd` from CI.
+
+### 8.3 Stale-process cleanup
+
+`_kill_stale_server()` kills every name in `camera_binaries()` (both exes
+on Windows), not only the one about to be spawned.
+
+### 8.4 USB presence check
+
+`_usb_video_device_present()` in the engine is Linux-only today; nothing
+to change on Windows. (The headless watchdog is Pi-only.)
+
+---
+
+## 9. Testing
+
+### 9.1 C# unit tests (xUnit, no hardware)
+
+- Protocol: envelope encode/decode, HELLO negotiation v1/v2, unknown type
+  ignored, oversize (> 16 MB) rejected, CONTROL_INFO JSON shape.
+- Controls: clamping, step rounding, exposure/fps coupling, enum
+  validation.
+- Fake backend: frames arrive, binning changes geometry and sends
+  STREAM_INFO first.
+- JPEG encoder: GRAY8 round trip (decode with WIC, mean abs error < 2 at
+  q90), size sanity, benchmark (§3.3 budget, reported, not failing in CI).
+- IDS backend logic behind an `IUEyeApi` seam with a fake implementation
+  (pixel-clock policy, exposure priority, long-exposure switch, timeout ->
+  fatal).
+
+### 9.2 Protocol conformance suite (shared, Python)
+
+New `tests/test_camera_conformance.py`, parametrized over servers:
+
+- always: `tests/mock_camera_server.py` (extended for v2 in #3),
+- when `PUSHNAV_CONFORMANCE_SERVER=<path-to-exe>` is set: that binary,
+  spawned with `--backend fake --port <free port>` (C# server), or the C
+  server when a camera is attached (manual).
+
+Covers `SPEC_PROTOCOL_CAMERA.md` §8 test vectors for v1, plus v2:
+handshake both directions, CONTROL_INFO after every SET_CONTROL,
+coupling, STREAM_INFO before resized frames, unknown types ignored.
+The C# job in CI runs it against the published AOT exe (§10.2).
+
+### 9.3 Hardware tests (manual; need Sebastian + the camera)
+
+Listed in the task checklist (§12) and marked **[HW]**.
+
+---
+
+## 10. Build, Packaging, CI
+
+### 10.1 Local build
+
+`camera\windows-dotnet\build.bat` (and `build.ps1`):
+`dotnet publish src/PushNav.CameraServer -c Release -r win-x64 -p:PublishAot=true -o publish`
+-> `publish\camera_server_dotnet.exe` (single file; AOT needs the MSVC
+linker, which `ilammy/msvc-dev-cmd` / VS Build Tools already provide).
+SDK pinned in `camera/windows-dotnet/global.json` (10.0.x,
+`rollForward: latestFeature`; the dev box also has an 11.0 preview SDK).
+
+### 10.2 `scripts/build_windows.bat` and Inno Setup
+
+- New Phase 1a after the C server build: run the .NET publish; fail the
+  build if it fails. Copy `camera_server_dotnet.exe` next to `PushNav.exe`
+  in Phase 3 (beside `camera_server.exe`).
+- `scripts/pushnav.iss`: no change needed; its `[Files]` entry packages
+  the whole assembled directory (`..\build\PushNav-windows\*`, recursive),
+  so the new exe is picked up. No IDS files in the installer. The installer's finished page /
+  docs mention "IDS cameras need the IDS Software Suite".
+- `SPEC_BUILD_RELEASE.md` §6.1 gets a line for the new server when this
+  lands (not edited by this spec).
+
+### 10.3 GitHub Actions (infra)
+
+- New workflow `.github/workflows/camera-server-windows.yml` on
+  `windows-latest`, triggered on PRs/pushes touching `camera/windows-dotnet/**`,
+  `tests/test_camera_conformance.py`, `tests/mock_camera_server.py`,
+  `python/evf/camera/**`: setup-dotnet 10, `dotnet test`, AOT publish,
+  then `uv run pytest tests/test_camera_conformance.py` with
+  `PUSHNAV_CONFORMANCE_SERVER` pointing at the exe. Upload the exe as an
+  artifact.
+- `build.yml` `build-windows` job: add `actions/setup-dotnet` (10.0.x)
+  before "Build zip + installer". The existing MSVC step stays (needed by
+  both the C server and the AOT linker).
+- Note: the repo has no PR test workflow today; this is the first one.
+
+---
+
+## 11. Open Questions
+
+| # | Question | Needs | Blocks approval? |
+|---|---|---|---|
+| Q1 | Is this UI-306xCP-M a "Rev. 2" unit supported by IDS peak's uEye transport layer? Only matters if the uEye API path fails. Check the label/revision and, optionally, install IDS peak and see if `ids_peak_cockpit` lists it. | Sebastian + camera | No (fallback only) |
+| Q2 | uEye headers/manual are not installed (`develop/` has only `bin/`). Install the IDS SDK developer option (headers + manual) on the dev box, or accept constants derived from the API docs? | Sebastian | No |
+| Q3 | Lens / focal length used with the IDS camera. The shipped tetra3rs database solves only 7°–10° FOV, i.e. about 65–93 mm on the IMX174. See `SPEC_CAMERA_CONTROLS.md` §5.2. | Sebastian | **Yes for #3 solving**, no for #1 streaming |
+| Q4 | Is q90 grayscale JPEG good enough for solving faint fields with the IMX174, or do we need FRAME_RAW soon? Compare solve rate on a real sky session (JPEG vs raw dump). | Sebastian + camera + sky | No |
+| Q5 | Max exposure to offer in the UI: the sensor allows 30 s; plate solving rarely needs > 2 s, and long frames make the UI sluggish. Proposed cap: 4 s, configurable. | Sebastian | No (default proposed) |
+| Q6 | Do the OV9281 modules support `KSPROPERTY_CAMERACONTROL_EXTENDED_EXPOSUREMODE` (µs exposure) under the inbox UVC driver, or only log2 steps? | Sebastian + OV9281 module | No |
+| Q7 | Does the uEye driver release the camera after `TerminateProcess` without `is_ExitCamera` (Python's `process.terminate()` on Windows)? Verify by kill + respawn. | camera | No |
+| Q8 | OK to runtime-load the user-installed, proprietary `ueye_api_64.dll` from GPL-3 code (no redistribution)? | Sebastian | No (low risk) |
+| Q9 | Is the WIC JPEG encoder within the 15 ms budget for 1936x1216 GRAY8? If not, switch to static libjpeg-turbo. | measurement | No |
+
+---
+
+## 12. Implementation Tasks
+
+Dependency: tasks 1–6 do not depend on #3. Task 7 (v2 controls in the
+C# server) needs the protocol v2 section approved and lands together with
+`SPEC_CAMERA_CONTROLS.md` tasks. **[HW]** = needs Sebastian + the real
+camera. **[INFRA]** = route to the infra agent.
+
+### 1. Skeleton
+- [ ] 1.1 Create `camera/windows-dotnet/` solution, `global.json`, `Directory.Build.props` (net10.0-windows, AOT, trim/AOT warnings as errors). Test: `dotnet build` clean.
+- [ ] 1.2 `Program.cs` with `--port/--backend/--list/--log-level`, exit codes 0/1/3. Test: xUnit for arg parsing; `--backend fake --list` prints JSON.
+- [ ] 1.3 AOT publish script `build.bat`/`build.ps1` -> `publish/camera_server_dotnet.exe`. Test: exe runs `--list` on a clean machine without the .NET runtime.
+
+### 2. Protocol v1 core
+- [ ] 2.1 Envelope + message types + System.Text.Json source-gen models. Test: xUnit round trips; > 16 MB rejected.
+- [ ] 2.2 Single-client TCP server, HELLO exchange, CONTROL_INFO after handshake and after every SET_CONTROL, GET_CONTROLS, unknown types ignored, exit after disconnect. Test: xUnit with a loopback client.
+- [ ] 2.3 Latest-frame slot + writer (no queue). Test: slow-reader test shows no backlog (only newest frame delivered).
+
+### 3. Fake backend + conformance
+- [ ] 3.1 `FakeBackend`: replays `--fake-images` (PNG -> GRAY8 -> JPEG) or a synthetic star field; simulated exposure/gain/fps/binning with IDS-like ranges. Test: xUnit.
+- [ ] 3.2 `tests/test_camera_conformance.py` (v1 vectors) parametrized over the Python mock and `PUSHNAV_CONFORMANCE_SERVER`. Test: passes locally against the mock and the C# exe.
+- [ ] 3.3 Engine smoke: run the app with `PUSHNAV_CAMERA_SERVER=dotnet` and the fake backend (dev flag), solver solves `tests/samples` frames. Test: manual + log check.
+
+### 4. Imaging
+- [ ] 4.1 WIC JPEG encoder (GRAY8, quality param) via CsWin32 COM, AOT-clean. Test: xUnit round trip error bound.
+- [ ] 4.2 YUY2/NV12 -> GRAY8 conversion. Test: xUnit with known patterns.
+- [ ] 4.3 Encoder benchmark (1936x1216 and 968x608). Test: reported numbers meet §3.3 or open the libjpeg-turbo fallback (Q9).
+
+### 5. IDS backend
+- [ ] 5.1 `UEyeNative` `[LibraryImport]` declarations + `NativeLibrary.TryLoad`; backend unavailable if DLL missing. Test: xUnit on a machine without the DLL (CI) -> `Probe()` returns [].
+- [ ] 5.2 `IUEyeApi` seam + fake; pixel-clock policy, exposure priority, long-exposure switch, timeout -> fatal. Test: xUnit.
+- [ ] 5.3 Probe/open: camera list, Mono8, auto features off, buffers, image queue, capture. Test **[HW]**: `--backend ids --list` shows `UI306xCP-M`, 1936x1216, controls.
+- [ ] 5.4 Capture loop + JPEG frames over TCP (v1). Test **[HW]**: conformance suite against the real camera; app shows live image.
+- [ ] 5.5 v1 controls (`exposure` in `"100us"`, `gain` raw 0–100). Test **[HW]**: sliders change brightness; CONTROL_INFO reflects applied values.
+- [ ] 5.6 Device removal -> exit(1); engine recovers when re-plugged. Test **[HW]**: unplug/replug during streaming.
+- [ ] 5.7 Fallback rule exit code 3 when no IDS camera present. Test: xUnit + manual without camera.
+- [ ] 5.8 Kill/respawn without `is_ExitCamera` (Q7). Test **[HW]**: `taskkill /F` then restart, camera opens.
+- [ ] 5.9 Night test: plate solve with the IDS camera, at least one target tracked. Test **[HW]** + sky + Q3 answered.
+
+### 6. Engine, build, packaging
+- [ ] 6.1 `paths.camera_binaries()`, `camera.windows_server` config key, `PUSHNAV_CAMERA_SERVER` env. Test: pytest (`tests/test_paths_*.py` style) for order and overrides.
+- [ ] 6.2 `SubprocessManager`: exit-code-3 fallback within one attempt, remember working binary, kill both names. Test: pytest with two fake server scripts (one exits 3).
+- [ ] 6.3 `build_windows.bat` Phase 1a + copy into release dir (`pushnav.iss` needs no change). Test: local build produces zip/installer containing both exes.
+- [ ] 6.4 Docs: `docs/hardware.md` IDS section (install IDS Software Suite, supported model), `SPEC_BUILD_RELEASE.md` §6.1 line, `CLAUDE.md` build line. Test: review.
+- [ ] 6.5 **[INFRA]** `camera-server-windows.yml` workflow (test, AOT publish, conformance, artifact). Test: workflow green on the PR.
+- [ ] 6.6 **[INFRA]** `build.yml` add setup-dotnet to `build-windows`. Test: `workflow_dispatch` with platform=windows produces the installer with both exes.
+
+### 7. Protocol v2 in the server (after #3 approval)
+- [ ] 7.1 v2 handshake + capabilities in HELLO. Test: conformance v2 against fake.
+- [ ] 7.2 v2 controls for IDS (`exposure` µs, `fps`, `gain`, `binning`) + coupling + STREAM_INFO on binning. Test: xUnit (fake API) + **[HW]** binning 2x2 shows 968x608 in the app.
+- [ ] 7.3 Optional FRAME_RAW support (capability only, off unless requested). Test: conformance v2.
+
+### 8. UVC backend (Media Foundation)
+- [ ] 8.1 MF enumeration + allowlist matching by symbolic link, `--list`. Test **[HW: OV9281]**: lists the module like the C server's diagnostic.
+- [ ] 8.2 Source reader MJPG passthrough at 1280x720, lowest fps; YUY2 fallback encoded. Test **[HW: OV9281]**.
+- [ ] 8.3 Exposure/gain via `IAMCameraControl`/`IAMVideoProcAmp` (v1 units), auto exposure off. Test **[HW: OV9281]**.
+- [ ] 8.4 v2 exposure in µs (extended control or enum of log2 steps, Q6), fps enum. Test **[HW: OV9281]**.
+- [ ] 8.5 Device loss -> exit(1). Test **[HW: OV9281]** unplug.
+- [ ] 8.6 Parity sign-off (§6 list) on each OV9281 module. **[HW]**, Sebastian.
+- [ ] 8.7 Phase C switch: UVC on by default; separate change retires `camera/windows/` and the MSVC CI step. **[INFRA]** for CI.
