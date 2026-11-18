@@ -1,0 +1,85 @@
+name: Test
+
+# Fast checks on every PR and on main. Release builds live in build.yml
+# (tags / manual only) and the docs site in docs.yml.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  python:
+    name: Python (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+            .python-version
+
+      # uv reads .python-version (3.12.x) and installs that interpreter on
+      # demand. The tests never import pywebview (PyQt6 is mocked in
+      # test_ui_notify.py), so skip the "desktop" group: on Linux it would
+      # pull PyQt6 + PyQt6-WebEngine (hundreds of MB) for nothing.
+      - name: Install dependencies
+        run: uv sync --locked --no-group desktop
+
+      # Always pass tests/: bare `pytest` also collects
+      # scripts/test_stellarium_live.py, which needs a live Stellarium and
+      # aborts collection. --no-sync keeps `uv run` from re-adding the
+      # desktop group.
+      - name: Run tests
+        run: uv run --no-sync pytest tests/ -q
+
+  web:
+    name: Web (vitest + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      # web/package.json has no "engines"; match the Node release builds use.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      # Type-checks (tsc -b) and bundles. `npm run lint` is deliberately not
+      # run: it has pre-existing errors.
+      - name: Build
+        run: npm run build
