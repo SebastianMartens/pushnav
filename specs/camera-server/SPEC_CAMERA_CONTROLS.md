@@ -53,6 +53,14 @@ answers `protocol_version: 1` and runs exactly today's v1 session (only
 stall timeout). The UI then shows only those two controls. Only the C#
 server speaks v2.
 
+**Scope of the new features (Sebastian, 2026-11-18).** Exposure in real
+units, fps, binning, the per-camera FOV and the wide database target the
+C# server only. With the upstream servers (still maintained in the parent
+repo) these features are simply not available, and they are not tested
+there: Sebastian owns only the IDS camera. The engine must still run an
+upstream v1 server exactly as today. That is covered by pytest against
+the mock in v1 mode, not by hardware tests.
+
 **New code in new modules** where practical:
 
 | New module | Holds |
@@ -638,9 +646,9 @@ proposed answer that the slices assume until he says otherwise.
 | Q6 | **[HW]** Centroid parameters at ~48"/px (1x1) and ~97"/px (2x2) on IMX174 frames: do `sigma_threshold`, `max_pixels`, `matched_filter_sigma` need re-tuning (possibly per database)? Measurement, not a decision: night test after slice S1 (1x1) and S5 (2x2). | Sebastian + camera + sky | No |
 | Q7 | **[HW]** Wide database: solve rate, solve time and false-positive probability with the proposed 18°–32° / mag 7.0 parameters at 1x1 and 2x2; tune FOV range and magnitude from the results. Measurement: same night tests as Q6. | Sebastian + camera + sky | No |
 | Q8 | **[HW]** Does tetra3rs's `max_fov_deg` refer to the horizontal FOV (as `fov_estimate` does) or the pattern diameter? The IDS setup has a ~30° diagonal at the top of the proposed range. If solves fail near the corners, raise `max_fov_deg`. Measurement: S1 night test. | camera + sky | No |
-| Q9 | Memory with one database loaded vs two (FOV search) on the Pi 3A+ (512 MB). Needs a Pi 3A+ (see Q11). | Pi | No |
+| Q9 | ~~Memory with one database loaded vs two (FOV search) on the Pi 3A+ (512 MB).~~ **Resolved 2026-11-18: no Pi available (Q11).** Measured on the laptop only (task 4.11); the one-database-at-a-time rule stays. | — | — |
 | Q10 | Interim FOV entry in slice S1: S1 lets the engine use a per-camera FOV and the wide database, but the Settings field and `/api/camera/fov` come in S2. Is setting `camera.profiles["ids:1409:3060"].fov_h_deg = 25.6` by hand in `config.json` (with `fov_source: "user"`) acceptable for a night test between S1 and S2? **Proposed: yes**; otherwise S1 grows by the API + one Settings field. | Sebastian | No (affects S1 size only) |
-| Q11 | Is an OV9281 module (and a Pi 3A+) available for the **[HW: OV9281]** checks (tasks 1.7, 6.5; Windows Q10) and the Pi memory check (Q9, task 4.11)? **Proposed:** if not, the v1 path is covered by pytest against the mock in v1 mode and by the C server staying unmodified; the hardware checks become optional and the Pi check uses laptop numbers plus the one-database-at-a-time rule. | Sebastian | No |
+| Q11 | ~~Is an OV9281 module (and a Pi 3A+) available for the OV9281 and Pi checks?~~ **Resolved 2026-11-18: no. The IDS camera is the only one.** The OV9281 hardware checks are dropped (tasks 1.7, 6.5; Windows Q10, 6.2a, task 8). The v1 path is covered by pytest against the mock in v1 mode and by the upstream servers staying unmodified. Memory is measured on the laptop only. See also the scope note in §1.2. | — | — |
 | Q12 | Long-exposure mode in **v2** sessions (`SPEC_CAMERA_SERVER_WINDOWS.md` §5.6): the IDS backend never leaves it today because switching off gaps the stream ~2.5 s, more than the v1 stall timeout; in long mode `fps` is fixed. **Proposed:** in v2 sessions, leave long mode when the exposure drops back into the normal range, wrapped in STREAM_INFO `reconfiguring` → `streaming` (the engine pauses stall detection for up to 5 s, §3.3), so `fps` becomes settable again. v1 sessions keep the sticky behaviour. | Sebastian | No (S5 only) |
 
 ---
@@ -662,7 +670,7 @@ of work is the slice plan in §10.8.
 - [ ] 1.4 `mock_camera_server.py` v2 mode (IDS-like controls, coupling, binning, STREAM_INFO). Test: pytest.
 - [ ] 1.5 `tests/test_camera_conformance.py` v2 vectors (§11.8 1–5; 6 only where GRAY8 is advertised), added to the existing v1 suite from #1 task 3.2. Test: green against the mock; the C# exe joins in S5.
 - [ ] 1.6 `data/VERSION.json` `protocol_version: 2` + update `tests/test_camera.py`/`test_subprocess_mgr.py` expectations. Test: pytest.
-- [ ] 1.7 v1 regression: the v2 engine against the mock in v1 mode behaves exactly like today (two controls, native units, 2.0 s stall). Test: pytest. **[HW: OV9281]** With `camera.windows_server = "c"` (and via the code-3 fallback), the unmodified C server works with the v2 engine.
+- [ ] 1.7 v1 regression: the v2 engine against the mock in v1 mode behaves exactly like today (two controls, native units, 2.0 s stall). Test: pytest. No hardware test with an upstream server (Q11).
 
 ### 2. Liveness and restore
 - [ ] 2.1 Per-session stall timeout, paused while reconfiguring, reset on any message. Test: pytest with a mock that sends 4 s frames.
@@ -684,7 +692,7 @@ of work is the slice plan in §10.8.
 - [ ] 4.8 **[INFRA]** `build.yml` "Verify required files" (4 jobs) lists `data/tetra3rs_gaia_wide.bin`. Test: `workflow_dispatch` build green.
 - [ ] 4.9 Web server: dynamic `image_w/h` (v1: HELLO size corrected by the first decoded frame, §5.1), `fov_h_deg`, `fov_source`, `solver_db`, `fov_out_of_range`; origin/projection parameters. Test: pytest payload tests at 1280x720 / 8.86°, 1936x1216 / 25.6° and 968x608 / 25.6°.
 - [ ] 4.10 Overlay marker scaling by `image_w / 1280` (NavOverlay, SyncCandidatesOverlay, StarOverlay) and a 1936x1216 / 25.6° Wizard test fixture. Test: vitest.
-- [ ] 4.11 Measure RSS with the narrow DB, the wide DB, and both, on the dev laptop and the Pi 3A+ (Q9). Test: numbers in the PR.
+- [ ] 4.11 Measure RSS with the narrow DB, the wide DB, and both, on the dev laptop (no Pi, Q9/Q11). Test: numbers in the PR.
 
 ### 5. API and UI
 - [ ] 5.1 `/api/control` number + validation; `/ws` additions. Test: pytest API tests.
@@ -698,7 +706,7 @@ of work is the slice plan in §10.8.
 - [ ] 6.2 **[HW]** Binning 1x1 <-> 2x2 while TRACKING: image switches to 968x608 without reconnect, overlays line up, pointing continues; calibration (`_CALIBRATE_STABLE_TOL` 0.05°) still completes at 2x2.
 - [ ] 6.3 **[HW]** Night test with the wide DB: solve rate, solve time and probability at 1x1 (~48"/px) and 2x2 (~97"/px) across several exposures and sky regions (incl. one near a galactic pole); check centroid params (Q6); tune DB FOV range and magnitude (Q7, Q8). Save a few frames as new `tests/samples` wide-field fixtures.
 - [ ] 6.4 **[HW]** Fresh profile without a focal length: FOV search finds ~25.6° and switches to the wide DB; then with 25 mm entered: no search.
-- [ ] 6.5 **[HW]** Restart the app: IDS settings and FOV restored from its profile, wide DB loaded at startup; plug the OV9281 (C server, v1): its own profile, narrow DB, no unit mix-up.
+- [ ] 6.5 **[HW]** Restart the app: IDS settings and FOV restored from its profile, wide DB loaded at startup. (A second camera on a v1 server is not tested on hardware, Q11; pytest covers separate profiles and the unit filter.)
 - [ ] 6.6 **[HW]** 4 s exposure: no stall-restart loop.
 
 ### 7. Docs
@@ -743,14 +751,14 @@ the 25 mm lens from solving, and it works over today's v1 session.
 - FOV learning and FOV search (`solver/fov.py`), `POST /api/camera/fov`, Settings fields (camera, FOV + source + database, focal length, reset, out-of-range hint), calibration tied to `calibration.camera_key`, overlay marker scaling, RSS numbers.
 - Files: `python/evf/{solver/fov.py, solver/thread.py, engine/engine.py, webserver/server.py, config/profiles.py}`, `web/src/lib/types.ts`, `web/src/components/settings/Settings.tsx`, `web/src/components/live-view/{NavOverlay,SyncCandidatesOverlay,StarOverlay}.tsx`, `web/src/components/wizard/Wizard.test.tsx`.
 - Test: pytest for learning (outliers, range guard, 10 % step), search (fake solver that solves on one database only), the FOV API, `has_calibration` across camera keys; the wide-field fixture from S1 solves with the wide database and not with the narrow one; vitest for the Settings fields, marker scaling and the 1936x1216 / 25.6° Wizard fixture.
-- **[HW]** Task 6.4 (fresh profile finds ~25.6° by search; with 25 mm entered no search). Task 4.11 on the laptop; on the Pi only if available (Q11).
+- **[HW]** Task 6.4 (fresh profile finds ~25.6° by search; with 25 mm entered no search). Task 4.11 on the laptop (no Pi, Q11).
 
 **S3 Protocol v2 in the engine, against the mock.**
 - Negotiation, STREAM_INFO / FRAME_RAW parsing, float `set_control`, liveness, one restore path, per-profile control values with units, dropping results of the wrong size, mock v2 mode, conformance v2 vectors, `VERSION.json` `protocol_version: 2`.
 - No real server offers v2 yet, so every real session stays v1 and behaves exactly as before.
 - Files: `python/evf/camera/{protocol.py, client.py, stream.py, controls.py, subprocess_mgr.py}`, `python/evf/{engine/engine.py, solver/thread.py, config/profiles.py}`, `tests/mock_camera_server.py`, `tests/test_camera_v2.py`, `tests/test_camera_conformance.py`, expectation updates in `tests/test_camera.py` / `test_subprocess_mgr.py`, `data/VERSION.json`.
 - Test: pytest (v1 and v2 mock modes, 4 s frames without a restart, restore order and unit filter, first-run defaults, legacy migration).
-- **[HW: OV9281]** Task 1.7 is optional (Q11).
+- No hardware test: the v1 regression (1.7) is pytest-only (Q11).
 
 **S4 Controls API and UI.**
 - `/api/control` with numbers and validation, `/ws` control and stream fields, `CameraControls.tsx` for int/float/enum, log sliders, unit labels, and the reconfiguring state.

@@ -1,7 +1,7 @@
 # SPEC_CAMERA_SERVER_WINDOWS.md — PushNav
 
 Version: 1.3 (2026-11-18: status after PRs #9, #10, #14; task 7 (v2) detailed and scheduled in `SPEC_CAMERA_CONTROLS.md` §10.8; Q2, Q5 resolved. 1.2: C server kept permanently side by side, server selection, upstream minimal-diff rules; 1.1: 25 mm reference lens, wide-field solver database)
-Status: Approved (PR #8). Tasks 1–6 mostly implemented (PRs #9, #10, #14, #15; open: 5.6, 5.9, 6.2a, 6.6–6.8); task 7 (protocol v2) and task 8 (UVC, optional) open
+Status: Approved (PR #8). Tasks 1–6 mostly implemented (PRs #9, #10, #14, #15; open: 5.6, 5.9, 6.6–6.8; 6.2a not planned); task 7 (protocol v2) open; task 8 (UVC) not planned
 Date: 2026-11-18
 Target: Windows 10/11 x64
 Issue: SebastianMartens/pushnav#1 (IDS uEye UI-306xCP-M support)
@@ -742,12 +742,12 @@ adding a new workflow:
 | Q3 | ~~Lens / focal length~~ **Resolved:** 25 mm Basler lens (reference configuration, §2). Follow-up [HW] checks (solve rate/time with the wide database, centroid parameters at ~48/97"/px) are tracked in `SPEC_CAMERA_CONTROLS.md` §9 Q6–Q8. | — | No |
 | Q4 | Is q90 grayscale JPEG good enough for solving faint fields with the IMX174, or do we need FRAME_RAW soon? Compare solve rate on a real sky session (JPEG vs raw dump). | Sebastian + camera + sky | No |
 | Q5 | ~~Max exposure to offer in the UI: the sensor allows 30 s; plate solving rarely needs > 2 s, and long frames make the UI sluggish. Proposed cap: 4 s, configurable.~~ **Resolved 2026-11-18 (Sebastian, `SPEC_CAMERA_CONTROLS.md` §9 Q2): 4 s.** The IDS and Fake backends cap at 4 s (`MaxExposureUs`); the engine's `camera.max_exposure_us` can lower it further. | — | — |
-| Q6 | Do the OV9281 modules support `KSPROPERTY_CAMERACONTROL_EXTENDED_EXPOSUREMODE` (µs exposure) under the inbox UVC driver, or only log2 steps? | Sebastian + OV9281 module | No |
+| Q6 | ~~Do the OV9281 modules support `KSPROPERTY_CAMERACONTROL_EXTENDED_EXPOSUREMODE` (µs exposure) under the inbox UVC driver, or only log2 steps?~~ **Dropped 2026-11-18:** no OV9281 available (Q10), and task 8 is not planned. | — | — |
 | Q7 | ~~Does the uEye driver release the camera after `TerminateProcess` without `is_ExitCamera` (Python's `process.terminate()` on Windows)? Verify by kill + respawn.~~ **Resolved (task 5.8): yes.** `taskkill /F` on a streaming server, three times in a row on a UI-306xCP-M (driver 4.97): the process was gone 0.3 s later and every respawn opened the camera and streamed (3.7 s from start to listening). The engine's own recovery after a kill (RECONNECTING, then SETUP) took about 6 s. One caveat: a kill that lands while the server is already closing the camera can leave the process in "terminating" for several seconds (the driver call has to return first), so a respawn in that window would be expected to find the camera busy (not tested); the engine's backoff would cover it. | camera | No |
 | Q8 | ~~OK to runtime-load the user-installed, proprietary `ueye_api_64.dll` from GPL-3 code (no redistribution)?~~ **Resolved 2026-11-18: yes, documented per §3.4 (task 6.4).** | Sebastian | — |
 | Q9 | ~~Is the WIC JPEG encoder within the 15 ms budget for 1936x1216 GRAY8? If not, switch to static libjpeg-turbo.~~ **Resolved 2026-11-18 (task 4.3): yes, median 3.6 ms at 1936x1216 and 0.95 ms at 968x608 (Release, dev laptop); no fallback needed.** | measurement | No |
-| Q10 | **[HW: OV9281]** With the default `"dotnet"`, how much later does an OV9281 user get frames than with `"c"`? The delay covers the C# start, MF enumeration, code-3 exit and the C server start. Target: about 1 s or less (§8.3). | Sebastian + OV9281 module | No |
-| Q11 | Should the optional C# UVC backend ever become the default for OV9281 (`camera.dotnet_uvc = true`)? Proposed: no decision now; the C server stays the default path for UVC. | Sebastian, later | No |
+| Q10 | ~~**[HW: OV9281]** With the default `"dotnet"`, how much later does an OV9281 user get frames than with `"c"`?~~ **Resolved 2026-11-18 (Sebastian): the IDS camera is the only camera; nothing else is hardware-tested.** The new features target the C# server only; with an upstream server they are not available and not tested (`SPEC_CAMERA_CONTROLS.md` §1.2). An OV9281 user still works via the code-3 fallback (pytest-covered, task 6.2), just after the C# server's device wait; the fast exit (6.2a) is not planned. | — | — |
+| Q11 | ~~Should the optional C# UVC backend ever become the default for OV9281?~~ **Dropped 2026-11-18:** task 8 is not planned (no UVC camera to test with, Q10). The C server stays the UVC path. | — | — |
 | Q12 | Add the server choice to the Settings UI (task 6.7)? Proposed: optional, later. | Sebastian | No |
 | Q13 | ~~Longest exposure a v1 client may set: the sensor allows 30 s, the engine's v1 stall timeout is a fixed 2.0 s.~~ **Resolved (review of tasks 1-4): the v1 view caps exposure at 1.5 s and clamps SET_CONTROL to it (`V1ControlAdapter`). v2 sessions are not capped (adaptive stall timeout, protocol §11.7).** | — | No |
 
@@ -800,7 +800,7 @@ camera. **[INFRA]** = route to the infra agent.
   - kill both exe names.
 
   Test: pytest with two fake server scripts (one exits 3); `"c"` never starts the C# script; existing `tests/test_subprocess_mgr.py` unchanged and green. *(Done: `tests/test_subprocess_mgr_select.py`. The fallback restarts the connect deadline, because the C# server may have used up most of it with its 8 s device wait before exiting with code 3. An explicit `binary_path` bypasses the selection.)*
-- [ ] 6.2a MF device enumeration in the C# server (symbolic links, VID/PID, allowlist incl. `PUSHNAV_CAMERA_IDS`), used by the fast exit in §8.3. Test: xUnit with a fake enumerator; **[HW: OV9281]** OV9281 attached → exit 3 in < 1 s, the C server starts, frames arrive (Q10).
+- [ ] 6.2a *(Not planned, Q10: no UVC camera to test with; the code-3 fallback after the device wait stays.)* MF device enumeration in the C# server (symbolic links, VID/PID, allowlist incl. `PUSHNAV_CAMERA_IDS`), used by the fast exit in §8.3.
 - [x] 6.3 `build_windows.bat` Phase 1a (skips with a warning when `dotnet` is missing) + copy into the release dir (`pushnav.iss` needs no change). Test: local build with and without the .NET SDK on `PATH`; with it, the zip/installer contains both exes.
 - [x] 6.4 Docs: `docs/hardware.md` IDS section (install IDS Software Suite, supported model, licensing note), a `README.md` "Third-party software" note on the proprietary, separately installed IDS runtime that is loaded at runtime and never bundled (§3.4), a `SPEC_BUILD_RELEASE.md` §6.1 line, and a `CLAUDE.md` build line. Test: review.
 - [ ] 6.5 **[INFRA]** Add job `camera-server-windows` to `.github/workflows/test.yml` (xUnit, AOT publish, conformance against the exe, artifact; §10.3). Test: job green on the PR; existing `python`/`web` jobs unchanged.
@@ -818,7 +818,11 @@ Scheduled in the slices of `SPEC_CAMERA_CONTROLS.md` §10.8: 7.0 in S1,
 - [ ] 7.2 IDS v2: binning through `is_SetBinning` (options from `IS_GET_SUPPORTED_BINNING`) with the in-process restart of §5.5 and STREAM_INFO; `fps` advertised in v2; coupling (exposure priority) reported in CONTROL_INFO; long-exposure mode in v2 sessions per `SPEC_CAMERA_CONTROLS.md` §9 Q12. Test: xUnit with `FakeUEyeApi` (binning restart < 500 ms budget, STREAM_INFO order, long-mode exit wrapped in `reconfiguring`); **[HW]** conformance suite with `PUSHNAV_CONFORMANCE_BACKEND=ids` incl. v2 vectors; binning 2x2 shows 968x608 in the app.
 - [ ] 7.3 Optional FRAME_RAW support (capability only, off unless requested). Test: conformance v2 vector 6.
 
-### 8. UVC backend (Media Foundation): optional, no deadline, off by default
+### 8. UVC backend (Media Foundation): not planned (Q10, Q11)
+
+Kept for reference only. Sebastian has no UVC camera to test with, and the
+C server stays the UVC path.
+
 - [ ] 8.1 `UvcBackend` on top of the enumeration from 6.2a, behind `--enable-uvc` / `camera.dotnet_uvc`; `--list` shows UVC devices. Test **[HW: OV9281]**: lists the module like the C server's diagnostic.
 - [ ] 8.2 Source reader MJPG passthrough at 1280x720, lowest fps; YUY2 fallback encoded. Test **[HW: OV9281]**.
 - [ ] 8.3 Exposure/gain via `IAMCameraControl`/`IAMVideoProcAmp` (v1 units), auto exposure off. Test **[HW: OV9281]**.
