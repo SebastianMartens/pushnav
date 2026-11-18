@@ -48,6 +48,29 @@ if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 mkdir "%BUILD_DIR%"
 
 REM -------------------------------------------------------------------------
+REM fork: Phase 0: Find MSVC (cl.exe) when not run from a Developer Command
+REM Prompt. Locates Visual Studio / Build Tools via vswhere and calls vcvars64.
+REM -------------------------------------------------------------------------
+where cl.exe >nul 2>nul
+if not errorlevel 1 goto :msvc_ready
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "%VSWHERE%" goto :msvc_missing
+set "VS_PATH="
+for /f "usebackq delims=" %%I in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS_PATH=%%I"
+if not defined VS_PATH goto :msvc_missing
+if not exist "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat" goto :msvc_missing
+echo ==^> Setting up MSVC from %VS_PATH%
+call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat" >nul
+where cl.exe >nul 2>nul
+if not errorlevel 1 goto :msvc_ready
+:msvc_missing
+echo ERROR: cl.exe not found and no Visual Studio C++ tools detected.
+echo        Install Visual Studio Build Tools with the "Desktop development with C++" workload,
+echo        or run this script from a Developer Command Prompt.
+exit /b 1
+:msvc_ready
+
+REM -------------------------------------------------------------------------
 REM Phase 1: Build C camera server
 REM -------------------------------------------------------------------------
 echo ==^> Building C camera server
@@ -65,6 +88,31 @@ if not exist "%CAMERA_BIN%" (
     exit /b 1
 )
 popd
+
+REM -------------------------------------------------------------------------
+REM fork: Phase 1a: Build C# camera server (SPEC_CAMERA_SERVER_WINDOWS.md 10.2)
+REM Skipped with a warning when the .NET SDK is missing; fails the build if
+REM the publish itself fails.
+REM -------------------------------------------------------------------------
+set "CAMERA_DOTNET_BIN="
+where dotnet >nul 2>nul
+if errorlevel 1 (
+    echo WARNING: dotnet CLI not found - skipping the C# camera server.
+    echo          The release will only contain the C camera server.
+    goto :dotnet_done
+)
+echo ==^> Building C# camera server
+call "%REPO_ROOT%\camera\windows-dotnet\build.bat"
+if errorlevel 1 (
+    echo ERROR: C# camera server build failed
+    exit /b 1
+)
+set "CAMERA_DOTNET_BIN=%REPO_ROOT%\camera\windows-dotnet\publish\camera_server_dotnet.exe"
+if not exist "%CAMERA_DOTNET_BIN%" (
+    echo ERROR: camera_server_dotnet.exe not found
+    exit /b 1
+)
+:dotnet_done
 
 REM -------------------------------------------------------------------------
 REM Phase 1b: Build React UI
@@ -138,6 +186,8 @@ xcopy /s /e /q /y "%NUITKA_DIST%\*" "%APP_DIR%\"
 
 REM Copy camera server binary
 copy /y "%CAMERA_BIN%" "%APP_DIR%\camera_server.exe"
+REM fork: C# camera server, next to the C server (default on Windows)
+if defined CAMERA_DOTNET_BIN copy /y "%CAMERA_DOTNET_BIN%" "%APP_DIR%\camera_server_dotnet.exe"
 
 REM Copy data resources
 copy /y "%REPO_ROOT%\data\tetra3rs_gaia.bin" "%APP_DIR%\data\"
@@ -186,3 +236,4 @@ echo ==^> Build complete!
 echo     Dir:  %APP_DIR%
 echo     Zip:  %ZIP_PATH%
 if defined SETUP_PATH if exist "%SETUP_PATH%" echo     Setup: %SETUP_PATH%
+if not defined CAMERA_DOTNET_BIN echo     WARNING: built without the C# camera server (no .NET SDK)

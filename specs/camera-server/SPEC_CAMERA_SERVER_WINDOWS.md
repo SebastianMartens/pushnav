@@ -617,7 +617,7 @@ Upstream files touched by **this** spec (#1):
 | `python/evf/camera/subprocess_mgr.py` | `_resolve_binary` / `_spawn_process` call `server_select`; one branch in `_connect_with_retry` for exit code 3; `_kill_stale_server` iterates the names `server_select` returns | selection, code-3 fallback, cleanup |
 | `python/evf/config/manager.py` | one key `"windows_server": "dotnet"` in `DEFAULT_CONFIG["camera"]` | setting |
 | `python/evf/paths.py` | none expected (`server_select` builds on the existing root detection); at most one small helper if the dev/release root isn't reachable otherwise | — |
-| `scripts/build_windows.bat` | one block "Phase 1a: build C# camera server" after the C server build, plus one `copy` line in Phase 3 | packaging |
+| `scripts/build_windows.bat` | one block "Phase 1a: build C# camera server" after the C server build, plus one `copy` line in Phase 3; a "Phase 0" block that finds MSVC via `vswhere` + `vcvars64.bat` when `cl.exe` is not on `PATH` (#13) | packaging |
 | `.github/workflows/test.yml` | one new job `camera-server-windows` appended; existing jobs untouched | CI |
 | `.github/workflows/build.yml` | one `actions/setup-dotnet` step in `build-windows` | release build |
 | `docs/hardware.md`, `CLAUDE.md`, `specs/start/SPEC_BUILD_RELEASE.md` | short added paragraphs | docs |
@@ -801,7 +801,7 @@ camera. **[INFRA]** = route to the infra agent.
 
   Test: pytest with two fake server scripts (one exits 3); `"c"` never starts the C# script; existing `tests/test_subprocess_mgr.py` unchanged and green. *(Done: `tests/test_subprocess_mgr_select.py`. The fallback restarts the connect deadline, because the C# server may have used up most of it with its 8 s device wait before exiting with code 3. An explicit `binary_path` bypasses the selection.)*
 - [ ] 6.2a MF device enumeration in the C# server (symbolic links, VID/PID, allowlist incl. `PUSHNAV_CAMERA_IDS`), used by the fast exit in §8.3. Test: xUnit with a fake enumerator; **[HW: OV9281]** OV9281 attached → exit 3 in < 1 s, the C server starts, frames arrive (Q10).
-- [ ] 6.3 `build_windows.bat` Phase 1a (skips with a warning when `dotnet` is missing) + copy into the release dir (`pushnav.iss` needs no change). Test: local build with and without the .NET SDK on `PATH`; with it, the zip/installer contains both exes.
+- [x] 6.3 `build_windows.bat` Phase 1a (skips with a warning when `dotnet` is missing) + copy into the release dir (`pushnav.iss` needs no change). Test: local build with and without the .NET SDK on `PATH`; with it, the zip/installer contains both exes.
 - [x] 6.4 Docs: `docs/hardware.md` IDS section (install IDS Software Suite, supported model, licensing note), a `README.md` "Third-party software" note on the proprietary, separately installed IDS runtime that is loaded at runtime and never bundled (§3.4), a `SPEC_BUILD_RELEASE.md` §6.1 line, and a `CLAUDE.md` build line. Test: review.
 - [ ] 6.5 **[INFRA]** Add job `camera-server-windows` to `.github/workflows/test.yml` (xUnit, AOT publish, conformance against the exe, artifact; §10.3). Test: job green on the PR; existing `python`/`web` jobs unchanged.
 - [ ] 6.6 **[INFRA]** `build.yml`: add setup-dotnet to `build-windows` and a check that `camera_server_dotnet.exe` is in the release dir. Test: `workflow_dispatch` with platform=windows produces the installer with both exes.
