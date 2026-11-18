@@ -39,6 +39,11 @@ internal sealed class IdsBackend : ICameraBackend
     /// <summary>Capture waits in slices of this length so <see cref="Stop"/> and shutdown never wait for a long exposure.</summary>
     private const int WaitSliceMilliseconds = 250;
 
+    /// <summary>Frame rate and exposure the camera is brought to before long-exposure mode is switched on (see ApplyTimingAndExposure).</summary>
+    private const double EnterLongFps = 10;
+
+    private const double EnterLongQuickExposureMs = 10;
+
     /// <summary>Consecutive empty waits (or errors) before the camera counts as dead (spec 5.2).</summary>
     public const int MaxConsecutiveFailures = 3;
 
@@ -335,12 +340,11 @@ internal sealed class IdsBackend : ICameraBackend
         _longSupported = false;
         _longMaxMs = 0;
 
-        if (api.SupportsLongExposure(_camera)
-            && api.SetLongExposureEnabled(_camera, true) == UEyeConst.Success)
+        // The long range can be read without switching the mode on (switching costs a frame time, and leaving it more).
+        if (api.SupportsLongExposure(_camera))
         {
             _longSupported = api.GetLongExposureRange(_camera, out _, out _longMaxMs, out _) == UEyeConst.Success
                              && _longMaxMs > _normalMaxAtFloorMs;
-            api.SetLongExposureEnabled(_camera, false);
         }
 
         double minUs = Math.Ceiling(_clocks.Max(c => c.MinExposureMs) * 1000.0);
@@ -485,10 +489,11 @@ internal sealed class IdsBackend : ICameraBackend
     {
         var api = _api!;
         double exposureMs = exposureUs / 1000.0;
-        // Long-exposure mode is sticky: once on, it stays on until the camera is closed. Entering it costs a blink, but
-        // leaving it blocks the API call for about a second and then delivers no frame for another second (measured on
-        // the UI-306xCP-M: a 2.5 s gap), and the v1 engine restarts the camera server after 2.0 s without a frame.
-        // Inside long mode a shorter exposure is just a cheap SetExposure; the camera then runs at about 6 fps instead of 10.
+        // Long-exposure mode is sticky: once on, it stays on until the camera is closed. Switching it on is cheap (see
+        // below), but leaving it blocks the API call for about a second and then delivers no frame for another second
+        // (measured on the UI-306xCP-M: a 2.5 s gap), and the v1 engine restarts the camera server after 2.0 s without a
+        // frame. Inside long mode a shorter exposure is just a cheap SetExposure, and frames keep coming at the frame
+        // rate the camera had when the mode went on (10 fps at a 100 ms exposure, measured).
         bool wantLong = _longEnabled || (_longSupported && IdsTimingPolicy.NeedsLongExposure(exposureMs, _normalMaxAtFloorMs));
         double effectiveFps;
 
@@ -496,8 +501,16 @@ internal sealed class IdsBackend : ICameraBackend
         {
             if (!_longEnabled)
             {
-                // Long exposures are only possible at the lowest clock (the longest frames) and the fps floor.
-                SetClockAndFpsLocked(_clocks[0], IdsTimingPolicy.FloorFps);
+                // Switching the mode on takes about one frame time of the timing the camera has at that moment: 1.1 s
+                // at 1 fps, 0.2 s at 10 fps (measured). So after a long normal-mode exposure (slow frames) first get
+                // back to a short exposure and a fast frame rate, then switch; the long exposure itself is set after.
+                if (_appliedFps < EnterLongFps - 1e-6)
+                {
+                    double quickMs = Math.Min(EnterLongQuickExposureMs, exposureMs);
+                    Check(api.SetExposure(_camera, ref quickMs), "shorten the exposure");
+                    SetClockAndFpsLocked(IdsTimingPolicy.ChooseClock(_clocks, EnterLongFps), EnterLongFps);
+                }
+
                 Check(api.SetLongExposureEnabled(_camera, true), "enable long exposure");
                 _longEnabled = true;
             }

@@ -343,20 +343,43 @@ public class IdsBackendTests : IDisposable
     public void AnExposureBeyondTheNormalRangeSwitchesLongExposureModeOn()
     {
         var backend = CreateBackend();
+        _api.ClearCalls();
 
         Assert.True(backend.SetControl(ControlIds.Exposure, 1_200_000).Accepted);
 
         Assert.True(_api.LongExposureEnabled);
         Assert.Equal(1200.0, _api.ExposureMs, precision: 3);
-        Assert.Equal(1.0, _api.FrameRate, precision: 3);
+        // From the default 10 fps the camera is fast enough already: mode on first, then the exposure.
+        Assert.Equal(new[] { "SetLongExposure True", "SetExposure 1200" }, _api.Calls);
         Assert.Equal(1_200_000, Control(backend, ControlIds.Exposure).Cur);
-        Assert.Equal(1.0, Control(backend, ControlIds.Fps).Cur);
-
-        var order = _api.Calls.ToList();
-        Assert.True(order.LastIndexOf("SetFrameRate 1") < order.LastIndexOf("SetLongExposure True")); // timing first, then the mode
-        Assert.True(order.LastIndexOf("SetLongExposure True") < order.LastIndexOf("SetExposure 1200"));
+        Assert.Equal(1.0, Control(backend, ControlIds.Fps).Cur); // a 1.2 s frame is below the control's 1 fps floor
     }
 
+    [Fact]
+    public void EnteringLongModeFromSlowFramesFirstGoesBackToAFastShortExposure()
+    {
+        // Switching the mode on takes about one frame time of the current timing (1.1 s at 1 fps on the real camera,
+        // 0.2 s at 10 fps), so a camera that is exposing for most of a second is sped up before the switch.
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 900_000);
+        Assert.InRange(_api.FrameRate, 1.0, 1.2);
+        _api.ClearCalls();
+
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+
+        Assert.Equal(new[] { "SetExposure 10", "SetFrameRate 10", "SetLongExposure True", "SetExposure 1200" }, _api.Calls);
+        Assert.True(_api.LongExposureEnabled);
+        Assert.Equal(1200.0, _api.ExposureMs, precision: 3);
+    }
+
+    [Fact]
+    public void OpeningNeverSwitchesLongExposureModeOnOrOff()
+    {
+        CreateBackend();
+
+        Assert.Equal(0, _api.CallCount("SetLongExposure"));
+        Assert.False(_api.LongExposureEnabled);
+    }
     [Fact]
     public void LongExposureModeStaysOnForTheSession()
     {
