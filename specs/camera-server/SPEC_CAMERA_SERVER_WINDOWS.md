@@ -236,8 +236,15 @@ a benchmark test (task 4.3).
   download (developer option) or derives constants from the documented
   API (§11, Q2).
 - Runtime-loading a proprietary, user-installed driver DLL from a GPL
-  program is the same pattern as today's DirectShow/OS camera APIs; flag
-  for Sebastian, low risk (§11, Q8).
+  program is the same pattern as today's DirectShow/OS camera APIs.
+  **Decided (Sebastian, 2026-11-18): acceptable**, on two conditions: no
+  IDS file is bundled or redistributed, and the decision is documented for
+  users. That documentation is a "Third-party software" note in `README.md`
+  plus the IDS section in `docs/hardware.md` (task 6.4). Together they say:
+  - IDS components are proprietary and not part of PushNav.
+  - The user installs them separately.
+  - The C# server only loads `ueye_api_64.dll` at runtime when it is
+    present, and without it the IDS backend is simply unavailable.
 
 ### 3.5 Location and binary name
 
@@ -726,7 +733,7 @@ adding a new workflow:
 | Q5 | Max exposure to offer in the UI: the sensor allows 30 s; plate solving rarely needs > 2 s, and long frames make the UI sluggish. Proposed cap: 4 s, configurable. | Sebastian | No (default proposed) |
 | Q6 | Do the OV9281 modules support `KSPROPERTY_CAMERACONTROL_EXTENDED_EXPOSUREMODE` (µs exposure) under the inbox UVC driver, or only log2 steps? | Sebastian + OV9281 module | No |
 | Q7 | Does the uEye driver release the camera after `TerminateProcess` without `is_ExitCamera` (Python's `process.terminate()` on Windows)? Verify by kill + respawn. | camera | No |
-| Q8 | OK to runtime-load the user-installed, proprietary `ueye_api_64.dll` from GPL-3 code (no redistribution)? | Sebastian | No (low risk) |
+| Q8 | ~~OK to runtime-load the user-installed, proprietary `ueye_api_64.dll` from GPL-3 code (no redistribution)?~~ **Resolved 2026-11-18: yes, documented per §3.4 (task 6.4).** | Sebastian | — |
 | Q9 | Is the WIC JPEG encoder within the 15 ms budget for 1936x1216 GRAY8? If not, switch to static libjpeg-turbo. | measurement | No |
 | Q10 | **[HW: OV9281]** With the default `"dotnet"`, how much later does an OV9281 user get frames than with `"c"`? The delay covers the C# start, MF enumeration, code-3 exit and the C server start. Target: about 1 s or less (§8.3). | Sebastian + OV9281 module | No |
 | Q11 | Should the optional C# UVC backend ever become the default for OV9281 (`camera.dotnet_uvc = true`)? Proposed: no decision now; the C server stays the default path for UVC. | Sebastian, later | No |
@@ -783,7 +790,7 @@ camera. **[INFRA]** = route to the infra agent.
   Test: pytest with two fake server scripts (one exits 3); `"c"` never starts the C# script; existing `tests/test_subprocess_mgr.py` unchanged and green.
 - [ ] 6.2a MF device enumeration in the C# server (symbolic links, VID/PID, allowlist incl. `PUSHNAV_CAMERA_IDS`), used by the fast exit in §8.3. Test: xUnit with a fake enumerator; **[HW: OV9281]** OV9281 attached → exit 3 in < 1 s, the C server starts, frames arrive (Q10).
 - [ ] 6.3 `build_windows.bat` Phase 1a (skips with a warning when `dotnet` is missing) + copy into the release dir (`pushnav.iss` needs no change). Test: local build with and without the .NET SDK on `PATH`; with it, the zip/installer contains both exes.
-- [ ] 6.4 Docs: `docs/hardware.md` IDS section (install IDS Software Suite, supported model), `SPEC_BUILD_RELEASE.md` §6.1 line, `CLAUDE.md` build line. Test: review.
+- [ ] 6.4 Docs: `docs/hardware.md` IDS section (install IDS Software Suite, supported model, licensing note), a `README.md` "Third-party software" note on the proprietary, separately installed IDS runtime that is loaded at runtime and never bundled (§3.4), a `SPEC_BUILD_RELEASE.md` §6.1 line, and a `CLAUDE.md` build line. Test: review.
 - [ ] 6.5 **[INFRA]** Add job `camera-server-windows` to `.github/workflows/test.yml` (xUnit, AOT publish, conformance against the exe, artifact; §10.3). Test: job green on the PR; existing `python`/`web` jobs unchanged.
 - [ ] 6.6 **[INFRA]** `build.yml`: add setup-dotnet to `build-windows` and a check that `camera_server_dotnet.exe` is in the release dir. Test: `workflow_dispatch` with platform=windows produces the installer with both exes.
 - [ ] 6.7 *(Optional, later; Q12)* Settings UI select "Camera server: C# (default) / C" that writes `camera.windows_server` and triggers "Retry camera". Test: vitest + manual.
