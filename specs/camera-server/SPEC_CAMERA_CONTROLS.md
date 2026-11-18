@@ -1,6 +1,6 @@
 # SPEC_CAMERA_CONTROLS.md — PushNav
 
-Version: 1.1 (2026-11-18: 25 mm reference lens, wide-field solver database)
+Version: 1.2 (2026-11-18: C server stays v1 side by side, upstream minimal-diff rules; 1.1: 25 mm reference lens, wide-field solver database)
 Status: Draft — awaiting approval, not yet implemented
 Date: 2026-11-18
 Target: all platforms (engine, config, web UI); camera side on the Windows C# server first
@@ -36,6 +36,57 @@ Python engine, the config file, the web server and the React UI, and how a
 | **Stream geometry** | Width, height, binning and generation of the frames currently arriving (from STREAM_INFO, or from HELLO / the decoded frame in v1). |
 | **Generation** | Counter from STREAM_INFO that increases on every stream reconfiguration. |
 | **FOV** | Horizontal field of view in degrees of the whole sensor width with the user's lens. Independent of binning. |
+
+### 1.2 Upstream compatibility
+
+The fork merges upstream (`meridianfield/pushnav`) changes, so this work
+follows the same minimal-diff rules as `SPEC_CAMERA_SERVER_WINDOWS.md` §8.5.
+
+**Camera servers we don't touch.** The Windows C/DirectShow server
+(`camera/windows/`), the Linux C server and the macOS Swift server are not
+modified. They keep speaking protocol **v1**, permanently. That keeps
+working because v2 is negotiated on top of v1
+(`SPEC_PROTOCOL_CAMERA.md` §11.2): a v2 engine talking to any of them
+answers `protocol_version: 1` and runs exactly today's v1 session (only
+`exposure` and `gain`, their native units, fixed-size JPEG frames, 2.0 s
+stall timeout). The UI then shows only those two controls. Only the C#
+server speaks v2.
+
+**New code in new modules** where practical:
+
+| New module | Holds |
+|---|---|
+| `python/evf/camera/stream.py` | `StreamGeometry`, STREAM_INFO / FRAME_RAW parsing |
+| `python/evf/camera/controls.py` | control descriptors, validation, `restore_controls()` (§3.4) |
+| `python/evf/config/profiles.py` | camera-profile helpers on top of `ConfigManager` (§4) |
+| `python/evf/solver/databases.py` | solver-database registry, selection and swapping (§5.4.3) |
+| `python/evf/solver/fov.py` | FOV resolution, learning and FOV search (§5.2, §5.4.4) |
+| `tests/test_camera_v2.py`, `tests/test_profiles.py`, `tests/test_solver_databases.py`, `tests/test_camera_conformance.py` | new tests; existing test files get only updated expectations |
+
+**Upstream files touched** (small hooks, each marked
+`# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)`):
+
+| File | Hook | Why |
+|---|---|---|
+| `python/evf/camera/protocol.py` | 3 message ids + names | v2 messages |
+| `python/evf/camera/client.py` | version negotiation; dispatch of the new message types into `stream.py`; float `set_control` | v2 |
+| `python/evf/camera/subprocess_mgr.py` | stall timeout from `stream.py`; recovery calls `restore_controls()` | liveness, restore |
+| `python/evf/engine/engine.py` | `startup_camera()` / `set_control()` delegate to `controls.py` / `profiles.py`; owns `SolverParams` | restore, persistence |
+| `python/evf/solver/solver.py` | `solve_frame()` takes FOV + max error; database loaded via `databases.py` | per-profile FOV |
+| `python/evf/solver/thread.py` | reads `SolverParams`; drops mismatched-size results; feeds FOV learning | frame-size change |
+| `python/evf/webserver/server.py` | geometry/FOV from the engine instead of `_FOV_H`/`_IMG_W`/`_IMG_H`; float/enum in `/api/control` | dynamic geometry |
+| `python/evf/config/manager.py` | new default keys only | config |
+| `python/evf/paths.py` | `solver_db_dir()` | databases |
+| `tests/mock_camera_server.py` | opt-in `v2=True` mode; v1 default behaviour unchanged | tests |
+| `data/VERSION.json` | `protocol_version: 2`, `solver_db_version_wide` | versions |
+| `scripts/build_tetra3rs_catalog.py` | parameterised (`--db`) | wide database |
+| `scripts/build_mac.sh`, `build_linux.sh`, `build_windows.bat`, `build_headless_deb.sh`, `smoke_test_headless_deb.sh`, `.github/workflows/build.yml` | one extra copy/check line for the wide database | shipping |
+| `web/src/lib/types.ts`, `web/src/components/controls/CameraControls.tsx`, `web/src/components/settings/Settings.tsx`, `web/src/components/live-view/{NavOverlay,SyncCandidatesOverlay,StarOverlay}.tsx` | control types, settings fields, marker scaling | UI |
+| `specs/start/SPEC_PROTOCOL_CAMERA.md` | §11 (v2) and §12 (changelog) appended; v1 text unchanged | protocol |
+
+Merge-risk notes: `engine.py`, `client.py`, `webserver/server.py` and
+`CameraControls.tsx` are the likeliest conflict points. Keep hooks at the
+edges of functions and push logic into the new modules.
 
 ---
 
@@ -121,7 +172,8 @@ keys are **added** and picked up by `_merge_defaults`:
   "exposure": null,
   "gain": null,
   "extra_camera_ids": [],
-  "windows_server": "auto",
+  "windows_server": "dotnet",
+  "dotnet_uvc": false,
   "max_exposure_us": 4000000,
   "last_camera_key": null,
   "profiles": {
@@ -139,7 +191,8 @@ keys are **added** and picked up by `_merge_defaults`:
 }
 ```
 
-- `windows_server` is defined in `SPEC_CAMERA_SERVER_WINDOWS.md` §8.1.
+- `windows_server` (`"dotnet"` default, or `"c"`) and `dotnet_uvc` are defined in
+  `SPEC_CAMERA_SERVER_WINDOWS.md` §6 and §8.1. Windows only; ignored elsewhere.
 - `max_exposure_us`: UI/engine cap for the exposure slider (default 4 s,
   §9 Q2). The engine clamps the advertised `max` to it before sending
   controls to the UI.
@@ -487,8 +540,8 @@ Under Camera, add:
 - Engine use of FRAME_RAW / GRAY8 (needs JPEG encoding in the engine for
   `/frame.mjpg`; do after the JPEG-vs-raw solve-rate measurement,
   `SPEC_CAMERA_SERVER_WINDOWS.md` §11 Q4).
-- v2 in the macOS Swift and Linux C servers (they stay v1; their
-  controls keep working through §3.1).
+- v2 in the macOS Swift, Linux C and Windows C servers. They stay v1 and
+  unmodified; their controls keep working through §3.1 / §1.2.
 - ROI/cropping, gain boost, pixel clock in the UI.
 - Databases beyond the two in §5.4 (e.g. very wide all-sky lenses, or
   long focal lengths below 7°).
@@ -562,6 +615,7 @@ camera (25 mm lens) with the C# server from #1 (its task 7).
 - [ ] 1.4 `mock_camera_server.py` v2 mode (IDS-like controls, coupling, binning, STREAM_INFO). Test: pytest.
 - [ ] 1.5 `tests/test_camera_conformance.py` v2 vectors (shared with #1 task 3.2). Test: green against the mock.
 - [ ] 1.6 `data/VERSION.json` `protocol_version: 2` + update `tests/test_camera.py`/`test_subprocess_mgr.py` expectations. Test: pytest.
+- [ ] 1.7 v1 regression: the v2 engine against the mock in v1 mode behaves exactly like today (two controls, native units, 2.0 s stall). Test: pytest. **[HW: OV9281]** With `camera.windows_server = "c"` (and via the code-3 fallback), the unmodified C server works with the v2 engine.
 
 ### 2. Liveness and restore
 - [ ] 2.1 Per-session stall timeout, paused while reconfiguring, reset on any message. Test: pytest with a mock that sends 4 s frames.

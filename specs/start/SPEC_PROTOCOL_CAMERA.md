@@ -8,8 +8,9 @@ Protocol version (wire) **2**: Draft — specified in §11, not yet implemented
 Status: §1–§10 Reflect Current Implementation (v1); §11 Draft (v2)
 Date: 2026-11-18 (v2 draft); 2026-04-20 (v1 text)
 Transport: TCP on localhost
-Applies to: macOS (Swift), Linux (C/V4L2), Windows (C/DirectShow); v2 also
-Windows C#/.NET (`specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md`)
+Applies to: macOS (Swift), Linux (C/V4L2), Windows (C/DirectShow) — all v1;
+v1 + v2: Windows C#/.NET (`specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md`),
+which ships side by side with the Windows C server.
 
 The document-revision number above (3.0) is editorial — it tracks updates to
 this spec file, not the wire protocol. The wire protocol was unchanged from
@@ -537,8 +538,10 @@ Python mock and, when available, real servers.
 - Gain units: IDS reports a 0–100 scaled master gain; real dB is not
   available from the uEye API for every model. Proposed: `raw` now; a
   backend may switch to `x` (gain factor) later without a protocol change.
-- Should the macOS Swift and Linux C servers get v2 (at least exposure in
-  µs)? Not in scope of #3; they keep working as v1 peers. Separate issue.
+- The upstream servers (macOS Swift, Linux C, **Windows C/DirectShow**)
+  stay v1 and are not modified by this fork, so upstream changes to them
+  merge cleanly. They keep working as v1 peers through the negotiation in
+  §11.2. Giving them v2 would be an upstream decision, not part of #3.
 - Fix the Swift server's disconnect-on-unknown-type (§3 known issue) before
   any v2 client sends SET_STREAM_CONFIG to it? Not needed: a v2 client only
   sends v2 messages in a v2 session, and Swift never negotiates v2.
@@ -549,5 +552,5 @@ Python mock and, when available, real servers.
 
 | Doc version | Date | Change |
 |---|---|---|
-| 3.0 | 2026-11-18 | Added §11 protocol v2 draft (capability handshake, µs exposure, fps/binning controls, coupling, STREAM_INFO, FRAME_RAW, SET_STREAM_CONFIG, adaptive stall timeout). §1–§10 (v1) unchanged except header and cross-references. |
+| 3.0 | 2026-11-18 | (Also: the Windows C server stays v1 permanently beside the C# server.) Added §11 protocol v2 draft (capability handshake, µs exposure, fps/binning controls, coupling, STREAM_INFO, FRAME_RAW, SET_STREAM_CONFIG, adaptive stall timeout). §1–§10 (v1) unchanged except header and cross-references. |
 | 2.1 | 2026-04-20 | Editorial updates; wire protocol v1 unchanged. |

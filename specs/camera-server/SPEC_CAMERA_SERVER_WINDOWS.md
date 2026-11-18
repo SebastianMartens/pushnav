@@ -1,6 +1,6 @@
 # SPEC_CAMERA_SERVER_WINDOWS.md — PushNav
 
-Version: 1.1 (2026-11-18: 25 mm reference lens, wide-field solver database)
+Version: 1.2 (2026-11-18: C server kept permanently side by side, server selection, upstream minimal-diff rules; 1.1: 25 mm reference lens, wide-field solver database)
 Status: Draft — awaiting approval, not yet implemented
 Date: 2026-11-18
 Target: Windows 10/11 x64
@@ -27,13 +27,20 @@ the actual hardware:
 
 1. **IDS backend** (first; the goal of #1): IDS uEye UI-306xCP-M, USB
    VID `1409` / PID `3060`, mono, Sony IMX174, 1936x1216.
-2. **UVC backend** via Media Foundation: replaces the C/DirectShow server
-   for the OV9281 allowlist (Waveshare / Arducam / DECXIN).
+2. **UVC backend** via Media Foundation (**optional, no deadline**): an
+   alternative to the C/DirectShow server for the OV9281 allowlist
+   (Waveshare / Arducam / DECXIN). It is off by default; OV9281 users are
+   served by the C server through the automatic fallback (§8).
 3. **Later**: astronomy-camera SDKs (ZWO, QHY, ...) or ASCOM. Room is left
    in the backend interface (§4); not specified here.
 
-The C/DirectShow server stays in the build as a **fallback** until the C#
-server reaches parity for UVC webcams (§8), then it is retired.
+**Side by side, permanently.** The C# server is added **next to** the
+existing C/DirectShow server; it does not replace it. The C server
+(`camera/windows/camera_server.c`, `camera/windows/build.bat`) stays in the
+build for good and is **not modified** by this work, so upstream fixes to
+it merge cleanly. A setting picks which server starts; the default is the
+C# one (§8). The fork stays close to upstream by following the
+minimal-diff rules in §8.5.
 
 What does **not** change:
 
@@ -41,14 +48,14 @@ What does **not** change:
   on `127.0.0.1:8764` (`SPEC_ARCHITECTURE.md` §1.6, §7).
 - Exit semantics: the server `exit(1)`s on device disconnect / fatal capture
   error, and `SubprocessManager` runs its 5-attempt backoff (1, 2, 4, 8, 15 s).
-- The macOS (Swift) and Linux (C/V4L2) servers and the Python engine's
-  frame path (JPEG in, `LatestFrame`, solver thread).
+- The macOS (Swift), Linux (C/V4L2) **and Windows C/DirectShow** servers,
+  and the Python engine's frame path (JPEG in, `LatestFrame`, solver thread).
 
 ### 1.1 Terms
 
 | Term | Meaning |
 |---|---|
-| **Camera server** | The native process that owns the camera and serves the camera TCP protocol. One per platform; on Windows there are two during the transition (C# and C). |
+| **Camera server** | The native process that owns the camera and serves the camera TCP protocol. One per platform, except Windows, which has two side by side for good: the C# server (default) and the upstream C/DirectShow server. |
 | **Backend** | A class inside the C# camera server that knows one family of cameras (IDS, UVC, Fake, ...). It probes for devices, opens one, produces frames, and exposes controls. |
 | **Quirk** | A small per-camera-model class that adjusts a backend's defaults (formats, control mapping, ranges) for one VID/PID. Replaces `#ifdef`s and special cases in the backend. |
 | **Control** | A camera setting the app can read and change over the protocol (`exposure`, `gain`, `fps`, `binning`). Described by a control descriptor in CONTROL_INFO. |
@@ -113,6 +120,7 @@ Options considered:
 | IDS peak / GenTL with uEye transport layer | Not installed (no peak, no GenTL producer, no `GENICAM_GENTL64_PATH`) | Fallback, see below |
 | DirectShow `uEyeCapture.ax` through the C server | Registered, but RGB/Y800 formats, unknown control mapping, no binning/long exposure | Rejected |
 | `uEyeDotNet.dll` wrapper | netstandard2.0, pure managed, 338 `DllImport`s into `ueye_api_64`, 3 delegate types | Reference only (§3.2) |
+| Media Foundation (directly, or via IDS peak) | The camera is not a KS video-capture device, so MF can't see it; IDS peak offers no MF path (see below) | Rejected |
 
 Reasons for the uEye API: it is what the installed driver ships, it is
 verified on the real camera today, it covers all four controls (exposure
@@ -122,9 +130,35 @@ maintenance; this is acceptable for a camera model that is itself legacy.
 
 Fallback: an `IdsPeakBackend` (GenTL via IDS peak's C API `ids_peak_comfort_c`
 or `ids_peak` + `uEye transport layer`), only if the uEye API turns out to
-be unusable. IDS peak supports only *some* USB3 uEye CP models (Rev. 2) via
-its uEye transport layer; whether this 2015 unit qualifies is an open
+be unusable. According to IDS, peak reaches legacy uEye models through its
+uEye Transport Layer together with IDS Software Suite ≥ 4.95 (4.97 is
+installed). Whether this 2015 UI-306xCP-M is actually listed is an open
 question (§11, Q1). The backend interface (§4) keeps this a drop-in.
+
+**Why not Media Foundation for the IDS camera** (Sebastian's question,
+answered 2026-11-18):
+
+- Measured with the camera attached: WinRT
+  `DeviceInformation.FindAllAsync(DeviceClass.VideoCapture)` (the same KS
+  camera category Media Foundation enumerates) lists only "C505e HD
+  Webcam" and "HP True Vision 5MP Camera". The uEye appears as PnP class
+  `USB`, service `ueye_usb`, status OK. It is not a video-capture device,
+  so Media Foundation cannot open it.
+- IDS peak does not change that. It provides a **DirectShow** interface
+  (since peak 2.9; legacy UI models via the uEye Transport Layer + IDS
+  Software Suite ≥ 4.95), not a Media Foundation source and not a
+  registered `IMFVirtualCamera`. IDS's own UVC cameras are a different
+  product line. Sources:
+  [IDS peak 2.9 release notes](https://www.ids-imaging.us/release-note/release-notes-ids-peak-2-9.html),
+  [IDS peak DirectShow manual, usage notes](https://inosaki.com/info/IDS-Imaging-Cameras/Manual/ids-peak-directshow-manual/en/ds-notes-usage.html),
+  [IDS peak 26.06 readme](https://www.1stvision.com/software/IDS-Peak-26.06-Readme.pdf).
+- Even through a bridge, the result would be worse: Media Foundation's
+  standard capture pipeline delivers YUV/RGB, not mono/Bayer directly, and
+  a DirectShow bridge exposes binning, µs exposure and long exposure only
+  partially.
+
+So the native uEye API stays the decision (IDS peak API as the
+alternative), and Media Foundation is used only for the UVC backend (§6).
 
 ### 3.2 Interop under Native AOT
 
@@ -208,10 +242,10 @@ a benchmark test (task 4.3).
 ### 3.5 Location and binary name
 
 - Source: `camera/windows-dotnet/`.
-- Exe: `camera_server_dotnet.exe` (the C server keeps `camera_server.exe`
-  during the transition, so both can ship side by side).
+- Exe: `camera_server_dotnet.exe`. The C server keeps `camera_server.exe`;
+  both ship side by side permanently (§8).
 - `SubprocessManager._kill_stale_server()` must kill **both** names on
-  Windows (it uses `taskkill /IM <name>` today).
+  Windows (it uses `taskkill /IM <name>` today; §8.4).
 
 ---
 
@@ -394,8 +428,20 @@ The engine side is in `SPEC_CAMERA_CONTROLS.md` §5.
 
 ## 6. UVC Backend (Media Foundation)
 
-Purpose: replace `camera_server.c` for the OV9281 modules and other
-allowlisted UVC cameras.
+Status: **optional, no deadline, off by default.** The C server remains
+the supported path for UVC webcams. With the default setting `"dotnet"`,
+the C# server exits with code 3 for an OV9281 and the engine starts the C
+server (§8.2, §8.3), so OV9281 users keep working without this backend.
+It exists so that UVC cameras can later get v2 controls (µs exposure, fps)
+without touching the upstream C server. Enable it with the C# flag
+`--enable-uvc`. The engine passes that flag only when config
+`camera.dotnet_uvc` is `true` (default `false`).
+
+Independently of the backend, the C# server always does a cheap Media
+Foundation **enumeration** (symbolic links only, no streaming) for the fast
+code-3 exit in §8.3.
+
+Backend design (when built):
 
 - Enumerate with `MFEnumDeviceSources(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID)`;
   read `MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK`
@@ -427,11 +473,13 @@ allowlisted UVC cameras.
   or `ReadSample` stream-tick/error flags -> `Fatal` -> `exit(1)`.
 - HELLO `backend` value: `"windows-dotnet-mf"` (C server: `"windows-directshow"`).
 
-Parity definition (gate for retiring the C server, §8): on each of the
-three OV9281 modules the UVC backend must (a) be found with the same
-allowlist, (b) stream 1280x720 MJPG at the lowest fps, (c) disable auto
-exposure and apply exposure/gain with v1 units, (d) exit(1) within 2 s of
-unplugging, (e) pass the protocol conformance suite (§9.2).
+Done criteria for turning `camera.dotnet_uvc` on for a given user. These
+are never a gate for removing the C server, which stays. On each OV9281
+module the UVC backend must (a) find the module with the same allowlist,
+(b) stream 1280x720 MJPG at the lowest fps, (c) disable auto exposure and
+apply exposure/gain, (d) exit(1) within 2 s of unplugging, and (e) pass the
+protocol conformance suite (§9.2). Whether the default ever flips to
+`true` is Sebastian's call, later (§11, Q11).
 
 ---
 
@@ -450,51 +498,123 @@ unplugging, (e) pass the protocol conformance suite (§9.2).
 
 ---
 
-## 8. Engine Integration and Switch-Over
+## 8. Server Selection and Upstream Compatibility
 
-### 8.1 Binary resolution (`evf/paths.py`)
+The C# server and the C/DirectShow server are shipped **side by side,
+permanently**. Nothing here retires, moves or edits the C server.
 
-New function `camera_binaries() -> list[Path]` returns the Windows servers
-in preference order; `camera_binary()` stays for macOS/Linux and returns
-the first entry on Windows.
+### 8.1 Setting
 
-| Mode | Order |
-|---|---|
-| Windows release | `<root>/camera_server_dotnet.exe`, `<root>/camera_server.exe` |
-| Windows dev | `camera/windows-dotnet/publish/camera_server_dotnet.exe`, `camera/windows/camera_server.exe` |
+| Source | Values | Default | Notes |
+|---|---|---|---|
+| config `camera.windows_server` | `"dotnet"` \| `"c"` | `"dotnet"` | new key; merged into existing configs by `_merge_defaults` (no `CONFIG_VERSION` bump) |
+| env `PUSHNAV_CAMERA_SERVER` | `"dotnet"` \| `"c"` | unset | overrides the config; for debugging |
 
-Missing files are skipped. Override: config `camera.windows_server` =
-`"auto"` (default) | `"dotnet"` | `"directshow"`, and env var
-`PUSHNAV_CAMERA_SERVER` with the same values (env wins; for debugging).
+- Unknown values: log a WARNING and use `"dotnet"`.
+- On macOS and Linux the setting and the env var are ignored. Those
+  platforms keep their single server and `paths.camera_binary()` as today.
+- Settings UI: not required. An optional small later task (task 6.7)
+  could add a "Camera server: C# (default) / C" select to the Settings
+  panel. It would write the config key and trigger the existing
+  "Retry camera" path.
 
-### 8.2 Fallback rule (`SubprocessManager`)
+### 8.2 Which exe starts
 
-Phase A — C# server has IDS (+ Fake) only, UVC not at parity:
+Binary locations (resolved in a new module, `evf/camera/server_select.py`,
+which reuses `evf.paths` for the release/dev root):
 
-1. Spawn the first binary (C#).
-2. If it exits with code **3** (no supported camera) before the
-   handshake, spawn the next binary (C server) in the **same** attempt —
-   this does not consume a backoff step.
-3. Any other failure follows the existing backoff unchanged.
-4. Remember which binary worked; recovery attempts start with it.
-5. Log at INFO which server and backend are in use (from HELLO).
+| Mode | C# server | C server (unchanged) |
+|---|---|---|
+| Windows release | `<root>/camera_server_dotnet.exe` | `<root>/camera_server.exe` |
+| Windows dev | `camera/windows-dotnet/publish/camera_server_dotnet.exe` | `camera/windows/camera_server.exe` |
 
-Phase B — UVC backend lands but is not yet at parity: the UVC backend is
-compiled in but **off by default** (`--backend` list excludes it unless
-`camera.windows_server = "dotnet"` or `PUSHNAV_CAMERA_SERVER=dotnet`),
-so OV9281 users keep getting the C server through rule 2.
+Rules:
 
-Phase C — parity reached (§6 gate signed off by Sebastian): UVC backend on
-by default, then in a separate change remove `camera/windows/`, the
-second binary entry, the MSVC step in `build_windows.bat` and
-`ilammy/msvc-dev-cmd` from CI.
+| Setting | Spawn order | Code-3 fallback |
+|---|---|---|
+| `"dotnet"` (default) | C#, then C if C# exits with code 3 | **yes** |
+| `"c"` | C only | no (C# is never started) |
 
-### 8.3 Stale-process cleanup
+- **Code-3 fallback** (only with `"dotnet"`): if the C# server exits with
+  code **3** (`NO_SUPPORTED_CAMERA`, §4.3) before the handshake,
+  `SubprocessManager` spawns the C server in the **same** attempt. This
+  does not consume a backoff step. Any other failure (code 1, timeout)
+  follows the existing backoff unchanged.
+- The server that connected is remembered for the session, and recovery
+  attempts start with it. A new app start, or the user's "Retry camera",
+  goes back to the setting's order.
+- **Selected exe missing** (e.g. a dev checkout where
+  `camera\windows-dotnet\build.bat` was never run, or a build without the
+  .NET SDK): log a WARNING naming the missing path and how to build it
+  ("C# camera server not found at …; run camera\windows-dotnet\build.bat.
+  Falling back to the C server."), then use the other exe. This applies in
+  both directions (`"c"` selected but `camera_server.exe` missing → C#).
+  If neither exists: the existing `FileNotFoundError` path, with both
+  paths in the message.
+- Log at INFO which server was started and, after HELLO, its `backend` and
+  `camera_model`.
 
-`_kill_stale_server()` kills every name in `camera_binaries()` (both exes
-on Windows), not only the one about to be spawned.
+### 8.3 Fast exit for cameras the C server handles
 
-### 8.4 USB presence check
+With the default `"dotnet"`, OV9281 users go through the code-3 fallback,
+so the C# server must not hold them up with its 8 s device wait (§4.3):
+
+- While the UVC backend is disabled (default, §6), the C# server
+  enumerates Media Foundation video-capture devices once at startup. If
+  one matches the UVC allowlist (built-ins + `PUSHNAV_CAMERA_IDS`) and no
+  IDS camera is present, it exits with code 3 **immediately**, with a
+  stderr note ("UVC camera vid:pid is handled by the C server").
+- The 8 s wait only applies when no candidate device of any kind is seen
+  (camera just plugged in or waking up).
+- Target: an OV9281 user with the default setting gets frames at most
+  about 1 s later than with `"c"`. Measured in task 6.2 / 8.1 **[HW: OV9281]**.
+
+### 8.4 Stale-process cleanup
+
+`_kill_stale_server()` kills both exe names on Windows (`camera_server.exe`
+and `camera_server_dotnet.exe`), not only the one about to be spawned, so
+a leftover of either server can't hold the camera or port 8764.
+
+### 8.5 Upstream compatibility: files we touch
+
+Upstream (`meridianfield/pushnav`) accepts no PRs, so this fork merges
+upstream changes. Rules:
+
+- New code goes into **new files and directories** wherever practical:
+  `camera/windows-dotnet/**`, `evf/camera/server_select.py`,
+  `tests/test_camera_conformance.py`, `tests/test_server_select.py`,
+  `specs/camera-server/**`.
+- Edits to existing upstream files are **small, isolated hooks** that
+  call into the new modules. Each hook is marked with a one-line comment
+  `# fork: camera-server-dotnet (see specs/camera-server/...)` so it is
+  easy to find during a merge.
+- **Never modified:** `camera/windows/camera_server.c`,
+  `camera/windows/build.bat`, `camera/linux/**`, `camera/mac/**`,
+  `scripts/pushnav.iss`.
+
+Upstream files touched by **this** spec (#1):
+
+| File | Hook | Why |
+|---|---|---|
+| `python/evf/camera/subprocess_mgr.py` | `_resolve_binary` / `_spawn_process` call `server_select`; one branch in `_connect_with_retry` for exit code 3; `_kill_stale_server` iterates the names `server_select` returns | selection, code-3 fallback, cleanup |
+| `python/evf/config/manager.py` | one key `"windows_server": "dotnet"` in `DEFAULT_CONFIG["camera"]` | setting |
+| `python/evf/paths.py` | none expected (`server_select` builds on the existing root detection); at most one small helper if the dev/release root isn't reachable otherwise | — |
+| `scripts/build_windows.bat` | one block "Phase 1a: build C# camera server" after the C server build, plus one `copy` line in Phase 3 | packaging |
+| `.github/workflows/test.yml` | one new job `camera-server-windows` appended; existing jobs untouched | CI |
+| `.github/workflows/build.yml` | one `actions/setup-dotnet` step in `build-windows` | release build |
+| `docs/hardware.md`, `CLAUDE.md`, `specs/start/SPEC_BUILD_RELEASE.md` | short added paragraphs | docs |
+
+Merge-risk notes: `subprocess_mgr.py` and `build_windows.bat` are the
+likeliest conflict points. Keep the hooks at the edges of functions, not
+interleaved with upstream logic. The protocol v2 work (#3) touches more
+upstream files; it lists them in `SPEC_CAMERA_CONTROLS.md` §1.2.
+
+`build_windows.bat` Phase 1a: if the `dotnet` CLI is not on `PATH`, print a
+WARNING and skip it, so the upstream-style build still works. The release
+build in CI always has the SDK (§10.3), and its "Verify" step checks that
+`camera_server_dotnet.exe` exists in the release directory.
+
+### 8.6 USB presence check
 
 `_usb_video_device_present()` in the engine is Linux-only today; nothing
 to change on Windows. (The headless watchdog is Pi-only.)
@@ -524,7 +644,8 @@ New `tests/test_camera_conformance.py`, parametrized over servers:
 - always: `tests/mock_camera_server.py` (extended for v2 in #3),
 - when `PUSHNAV_CONFORMANCE_SERVER=<path-to-exe>` is set: that binary,
   spawned with `--backend fake --port <free port>` (C# server), or the C
-  server when a camera is attached (manual).
+  server when a camera is attached (manual; v1 vectors only, because the
+  C server stays v1).
 
 Covers `SPEC_PROTOCOL_CAMERA.md` §8 test vectors for v1, plus v2:
 handshake both directions, CONTROL_INFO after every SET_CONTROL,
@@ -550,9 +671,11 @@ SDK pinned in `camera/windows-dotnet/global.json` (10.0.x,
 
 ### 10.2 `scripts/build_windows.bat` and Inno Setup
 
-- New Phase 1a after the C server build: run the .NET publish; fail the
-  build if it fails. Copy `camera_server_dotnet.exe` next to `PushNav.exe`
-  in Phase 3 (beside `camera_server.exe`).
+- New Phase 1a after the (unchanged) C server build: run the .NET publish.
+  If the `dotnet` CLI is missing, print a WARNING and skip it (§8.5); if the
+  publish runs and fails, fail the build. Copy `camera_server_dotnet.exe`
+  next to `PushNav.exe` in Phase 3, beside `camera_server.exe`. Both
+  additions are isolated blocks (§8.5).
 - `scripts/pushnav.iss`: no change needed; its `[Files]` entry packages
   the whole assembled directory (`..\build\PushNav-windows\*`, recursive),
   so the new exe is picked up. No IDS files in the installer. The installer's finished page /
@@ -586,8 +709,9 @@ adding a new workflow:
 - The existing `python` job (windows) runs the conformance suite against
   the Python mock only, since `PUSHNAV_CONFORMANCE_SERVER` is unset there.
 - `build.yml` `build-windows` job: add `actions/setup-dotnet` (10.0.x)
-  before "Build zip + installer". The existing MSVC step stays (needed by
-  both the C server and the AOT linker).
+  before "Build zip + installer", and a post-build check that
+  `camera_server_dotnet.exe` is in the release directory. The existing
+  MSVC step stays for good (needed by the C server and by the AOT linker).
 
 ---
 
@@ -595,7 +719,7 @@ adding a new workflow:
 
 | # | Question | Needs | Blocks approval? |
 |---|---|---|---|
-| Q1 | Is this UI-306xCP-M a "Rev. 2" unit supported by IDS peak's uEye transport layer? Only matters if the uEye API path fails. Check the label/revision and, optionally, install IDS peak and see if `ids_peak_cockpit` lists it. | Sebastian + camera | No (fallback only) |
+| Q1 | Is this UI-306xCP-M listed by IDS peak's uEye Transport Layer (IDS Software Suite 4.97 is installed)? Only matters if the uEye API path fails. Check the label/revision and, optionally, install IDS peak and see if `ids_peak_cockpit` lists it. | Sebastian + camera | No (fallback only) |
 | Q2 | uEye headers/manual are not installed (`develop/` has only `bin/`). Install the IDS SDK developer option (headers + manual) on the dev box, or accept constants derived from the API docs? | Sebastian | No |
 | Q3 | ~~Lens / focal length~~ **Resolved:** 25 mm Basler lens (reference configuration, §2). Follow-up [HW] checks (solve rate/time with the wide database, centroid parameters at ~48/97"/px) are tracked in `SPEC_CAMERA_CONTROLS.md` §9 Q6–Q8. | — | No |
 | Q4 | Is q90 grayscale JPEG good enough for solving faint fields with the IMX174, or do we need FRAME_RAW soon? Compare solve rate on a real sky session (JPEG vs raw dump). | Sebastian + camera + sky | No |
@@ -604,12 +728,15 @@ adding a new workflow:
 | Q7 | Does the uEye driver release the camera after `TerminateProcess` without `is_ExitCamera` (Python's `process.terminate()` on Windows)? Verify by kill + respawn. | camera | No |
 | Q8 | OK to runtime-load the user-installed, proprietary `ueye_api_64.dll` from GPL-3 code (no redistribution)? | Sebastian | No (low risk) |
 | Q9 | Is the WIC JPEG encoder within the 15 ms budget for 1936x1216 GRAY8? If not, switch to static libjpeg-turbo. | measurement | No |
+| Q10 | **[HW: OV9281]** With the default `"dotnet"`, how much later does an OV9281 user get frames than with `"c"`? The delay covers the C# start, MF enumeration, code-3 exit and the C server start. Target: about 1 s or less (§8.3). | Sebastian + OV9281 module | No |
+| Q11 | Should the optional C# UVC backend ever become the default for OV9281 (`camera.dotnet_uvc = true`)? Proposed: no decision now; the C server stays the default path for UVC. | Sebastian, later | No |
+| Q12 | Add the server choice to the Settings UI (task 6.7)? Proposed: optional, later. | Sebastian | No |
 
 ---
 
 ## 12. Implementation Tasks
 
-Dependency: tasks 1–6 do not depend on #3. Task 7 (v2 controls in the
+Dependency: tasks 1–6 do not depend on #3. Task 8 is optional and has no deadline. Task 7 (v2 controls in the
 C# server) needs the protocol v2 section approved and lands together with
 `SPEC_CAMERA_CONTROLS.md` tasks. **[HW]** = needs Sebastian + the real
 camera. **[INFRA]** = route to the infra agent.
@@ -641,28 +768,36 @@ camera. **[INFRA]** = route to the infra agent.
 - [ ] 5.4 Capture loop + JPEG frames over TCP (v1). Test **[HW]**: conformance suite against the real camera; app shows live image.
 - [ ] 5.5 v1 controls (`exposure` in `"100us"`, `gain` raw 0–100). Test **[HW]**: sliders change brightness; CONTROL_INFO reflects applied values.
 - [ ] 5.6 Device removal -> exit(1); engine recovers when re-plugged. Test **[HW]**: unplug/replug during streaming.
-- [ ] 5.7 Fallback rule exit code 3 when no IDS camera present. Test: xUnit + manual without camera.
+- [ ] 5.7 Exit code 3 when no supported camera is present. Exit 3 immediately when only an allowlisted UVC camera is seen and UVC is disabled (§8.3; needs the MF enumeration from task 6.2a). Test: xUnit (fake device lists) + manual without camera.
 - [ ] 5.8 Kill/respawn without `is_ExitCamera` (Q7). Test **[HW]**: `taskkill /F` then restart, camera opens.
 - [ ] 5.9 Night test: plate solve with the IDS camera (25 mm lens), at least one target tracked. Needs the wide solver database and per-profile FOV from `SPEC_CAMERA_CONTROLS.md` tasks 4.1–4.5. Test **[HW]** + sky.
 
 ### 6. Engine, build, packaging
-- [ ] 6.1 `paths.camera_binaries()`, `camera.windows_server` config key, `PUSHNAV_CAMERA_SERVER` env. Test: pytest (`tests/test_paths_*.py` style) for order and overrides.
-- [ ] 6.2 `SubprocessManager`: exit-code-3 fallback within one attempt, remember working binary, kill both names. Test: pytest with two fake server scripts (one exits 3).
-- [ ] 6.3 `build_windows.bat` Phase 1a + copy into release dir (`pushnav.iss` needs no change). Test: local build produces zip/installer containing both exes.
+- [ ] 6.1 New `evf/camera/server_select.py`: `camera.windows_server` (`"dotnet"` default, or `"c"`), `PUSHNAV_CAMERA_SERVER` override, warning on invalid values, missing-exe fallback in both directions, ignored on macOS/Linux. Plus one config default line in `config/manager.py`. Test: new `tests/test_server_select.py` (dev/release layouts, both settings, env override, each exe missing, neither present, non-Windows).
+- [ ] 6.2 `SubprocessManager` hooks (marked `# fork:`):
+  - spawn via `server_select`;
+  - exit-code-3 fallback only for `"dotnet"`, within one attempt;
+  - remember the working server for recovery;
+  - kill both exe names.
+
+  Test: pytest with two fake server scripts (one exits 3); `"c"` never starts the C# script; existing `tests/test_subprocess_mgr.py` unchanged and green.
+- [ ] 6.2a MF device enumeration in the C# server (symbolic links, VID/PID, allowlist incl. `PUSHNAV_CAMERA_IDS`), used by the fast exit in §8.3. Test: xUnit with a fake enumerator; **[HW: OV9281]** OV9281 attached → exit 3 in < 1 s, the C server starts, frames arrive (Q10).
+- [ ] 6.3 `build_windows.bat` Phase 1a (skips with a warning when `dotnet` is missing) + copy into the release dir (`pushnav.iss` needs no change). Test: local build with and without the .NET SDK on `PATH`; with it, the zip/installer contains both exes.
 - [ ] 6.4 Docs: `docs/hardware.md` IDS section (install IDS Software Suite, supported model), `SPEC_BUILD_RELEASE.md` §6.1 line, `CLAUDE.md` build line. Test: review.
 - [ ] 6.5 **[INFRA]** Add job `camera-server-windows` to `.github/workflows/test.yml` (xUnit, AOT publish, conformance against the exe, artifact; §10.3). Test: job green on the PR; existing `python`/`web` jobs unchanged.
-- [ ] 6.6 **[INFRA]** `build.yml` add setup-dotnet to `build-windows`. Test: `workflow_dispatch` with platform=windows produces the installer with both exes.
+- [ ] 6.6 **[INFRA]** `build.yml`: add setup-dotnet to `build-windows` and a check that `camera_server_dotnet.exe` is in the release dir. Test: `workflow_dispatch` with platform=windows produces the installer with both exes.
+- [ ] 6.7 *(Optional, later; Q12)* Settings UI select "Camera server: C# (default) / C" that writes `camera.windows_server` and triggers "Retry camera". Test: vitest + manual.
+- [ ] 6.8 Upstream-merge check before the PR: `git diff upstream/main -- camera/windows/` is empty, and every edited upstream file is in the §8.5 table.
 
 ### 7. Protocol v2 in the server (after #3 approval)
 - [ ] 7.1 v2 handshake + capabilities in HELLO. Test: conformance v2 against fake.
 - [ ] 7.2 v2 controls for IDS (`exposure` µs, `fps`, `gain`, `binning`) + coupling + STREAM_INFO on binning. Test: xUnit (fake API) + **[HW]** binning 2x2 shows 968x608 in the app.
 - [ ] 7.3 Optional FRAME_RAW support (capability only, off unless requested). Test: conformance v2.
 
-### 8. UVC backend (Media Foundation)
-- [ ] 8.1 MF enumeration + allowlist matching by symbolic link, `--list`. Test **[HW: OV9281]**: lists the module like the C server's diagnostic.
+### 8. UVC backend (Media Foundation): optional, no deadline, off by default
+- [ ] 8.1 `UvcBackend` on top of the enumeration from 6.2a, behind `--enable-uvc` / `camera.dotnet_uvc`; `--list` shows UVC devices. Test **[HW: OV9281]**: lists the module like the C server's diagnostic.
 - [ ] 8.2 Source reader MJPG passthrough at 1280x720, lowest fps; YUY2 fallback encoded. Test **[HW: OV9281]**.
 - [ ] 8.3 Exposure/gain via `IAMCameraControl`/`IAMVideoProcAmp` (v1 units), auto exposure off. Test **[HW: OV9281]**.
 - [ ] 8.4 v2 exposure in µs (extended control or enum of log2 steps, Q6), fps enum. Test **[HW: OV9281]**.
 - [ ] 8.5 Device loss -> exit(1). Test **[HW: OV9281]** unplug.
-- [ ] 8.6 Parity sign-off (§6 list) on each OV9281 module. **[HW]**, Sebastian.
-- [ ] 8.7 Phase C switch: UVC on by default; separate change retires `camera/windows/` and the MSVC CI step. **[INFRA]** for CI.
+- [ ] 8.6 Done-criteria check (§6) on each OV9281 module with `camera.dotnet_uvc = true`. **[HW]**, Sebastian. The C server is not removed or changed either way.
