@@ -211,6 +211,12 @@ internal sealed class IdsBackend : ICameraBackend
             CloseCameraLocked();
 
             int rc = api.InitCamera(deviceId, out int camera);
+            if (rc == UEyeConst.StarterFirmwareUploadNeeded)
+            {
+                // The flag that would let is_InitCamera upload the firmware itself is deliberately never set: that writes to the camera.
+                throw new CameraException($"Could not open {device.Model}: {UEyeConst.StatusText(rc)}.");
+            }
+
             if (rc != UEyeConst.Success)
             {
                 string hint = rc is UEyeConst.AllDevicesBusy or UEyeConst.DeviceInUse or UEyeConst.DeviceBusy or UEyeConst.CantOpenDevice
@@ -385,6 +391,12 @@ internal sealed class IdsBackend : ICameraBackend
                 control = BuildControls().FirstOrDefault(c => c.Id == id);
             }
 
+            if (id == ControlIds.Fps && _longEnabled)
+            {
+                return ControlResult.Rejected(
+                    "the frame rate cannot be set while long-exposure mode is on (it stays on until the camera server restarts)");
+            }
+
             if (control == null)
             {
                 return ControlResult.Rejected($"unknown control '{id}'");
@@ -472,10 +484,12 @@ internal sealed class IdsBackend : ICameraBackend
                 Label = "Frame rate",
                 Kind = ControlKind.Float,
                 Unit = "fps",
-                Min = IdsTimingPolicy.FloorFps,
-                Max = maxFps,
+                // In long-exposure mode the camera does not regulate the frame rate (a frame lasts the exposure):
+                // the control shows what it does and is not settable until the camera server restarts.
+                Min = _longActive ? Math.Round(_effectiveFps, 2) : IdsTimingPolicy.FloorFps,
+                Max = _longActive ? Math.Round(_effectiveFps, 2) : maxFps,
                 Step = 0.01,
-                Cur = Math.Clamp(Math.Round(_effectiveFps, 2), IdsTimingPolicy.FloorFps, maxFps),
+                Cur = _longActive ? Math.Round(_effectiveFps, 2) : Math.Clamp(Math.Round(_effectiveFps, 2), IdsTimingPolicy.FloorFps, maxFps),
             },
         ];
     }

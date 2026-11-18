@@ -22,6 +22,10 @@ internal static class UEyeConst
     public const int TimedOut = 122;
     public const int InvalidParameter = 125;
     public const int NotSupported = 155;
+
+    /// <summary>The camera runs starter firmware and needs a firmware update before it can be opened (IS_STARTER_FW_UPLOAD_NEEDED).</summary>
+    public const int StarterFirmwareUploadNeeded = 184;
+
     public const int DeviceBusy = 205;
     public const int NoSuchDevice = 212;
     public const int DeviceInUse = 213;
@@ -108,6 +112,7 @@ internal static class UEyeConst
         TimedOut => "timed out",
         InvalidParameter => "invalid parameter",
         NotSupported => "not supported",
+        StarterFirmwareUploadNeeded => "camera firmware must be updated: open the IDS Camera Manager once (PushNav never uploads firmware)",
         DeviceBusy => "device busy",
         NoSuchDevice => "no such device",
         DeviceInUse => "device in use by another application",

@@ -191,6 +191,20 @@ public class IdsBackendTests : IDisposable
     }
 
     [Fact]
+    public void ACameraThatNeedsAFirmwareUpdateSaysSoAndIsNeverUpdatedByPushNav()
+    {
+        _api.InitStatus = UEyeConst.StarterFirmwareUploadNeeded;
+        var backend = CreateBackend(open: false);
+
+        var ex = Assert.Throws<CameraException>(() => backend.Open(backend.Probe()[0]));
+
+        Assert.Contains("firmware must be updated", ex.Message);
+        Assert.Contains("IDS Camera Manager", ex.Message);
+        Assert.DoesNotContain("is_InitCamera 184", ex.Message); // the message is the advice, not a bare code
+        Assert.Equal(new[] { $"InitCamera {FakeUEyeApi.DeviceId}" }, _api.Calls); // nothing else was tried
+    }
+
+    [Fact]
     public void AFailureHalfwayThroughOpenReleasesTheCamera()
     {
         _api.SensorInfoStatus = UEyeConst.NoSuccess;
@@ -352,7 +366,25 @@ public class IdsBackendTests : IDisposable
         // From the default 10 fps the camera is fast enough already: mode on first, then the exposure.
         Assert.Equal(new[] { "SetLongExposure True", "SetExposure 1200" }, _api.Calls);
         Assert.Equal(1_200_000, Control(backend, ControlIds.Exposure).Cur);
-        Assert.Equal(1.0, Control(backend, ControlIds.Fps).Cur); // a 1.2 s frame is below the control's 1 fps floor
+        Assert.Equal(0.83, Control(backend, ControlIds.Fps).Cur); // a 1.2 s frame: what the camera really does
+    }
+
+    [Fact]
+    public void InLongModeTheFrameRateIsShownAsWhatItIsAndCannotBeSet()
+    {
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        _api.ClearCalls();
+
+        var result = backend.SetControl(ControlIds.Fps, 20);
+
+        Assert.False(result.Accepted);
+        Assert.Contains("long-exposure mode", result.Message);
+        Assert.Empty(_api.Calls);
+        var fps = Control(backend, ControlIds.Fps);
+        Assert.Equal(fps.Min, fps.Max);
+        Assert.Equal(fps.Cur, fps.Max);
+        Assert.Equal(0.83, fps.Cur);
     }
 
     [Fact]
