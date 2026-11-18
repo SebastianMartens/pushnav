@@ -204,9 +204,10 @@ Needs the .NET 10 SDK (pinned in `camera/windows-dotnet/global.json`) and the MS
 linker. At runtime `camera.windows_server` (`"dotnet"` default, or `"c"`) and the
 `PUSHNAV_CAMERA_SERVER` environment variable pick the server
 (`evf/camera/server_select.py`); a C# server that finds no supported camera exits with
-code 3 and the engine starts the C server instead. Both exes are meant to ship in the
-release directory; adding the C# build to `scripts/build_windows.bat` is task 6.3 of
-`specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md` (sections 8 and 10).
+code 3 and the engine starts the C server instead. `scripts/build_windows.bat` builds
+both and ships both in the release directory (fork, task 6.3 of
+`specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md`). Without `dotnet` on `PATH` it
+skips the C# server with a warning.
 
 ### 6.2 Python app + installer
 
@@ -214,8 +215,10 @@ release directory; adding the C# build to `scripts/build_windows.bat` is task 6.
 scripts\build_windows.bat
 ```
 
-Uses Nuitka `--standalone`. Post-build:
-- Copies camera binary, data files, marketing assets
+Uses Nuitka `--standalone`. Runs from a plain command prompt: when `cl.exe` is not on
+`PATH`, the script finds Visual Studio / Build Tools via `vswhere` and calls
+`vcvars64.bat` (fork addition). Post-build:
+- Copies camera binaries (`camera_server.exe`, and `camera_server_dotnet.exe` when built), data files, marketing assets
 - Produces `PushNav-windows-x64.zip` (raw standalone dist, always)
 - If Inno Setup is installed (`ISCC.exe` on PATH), also runs
   `scripts/pushnav.iss` to build `PushNav-windows-x64-setup.exe`. The
