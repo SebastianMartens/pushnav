@@ -21,6 +21,15 @@ Run against the published exe::
 
     $env:PUSHNAV_CONFORMANCE_SERVER = "camera\\windows-dotnet\\publish\\camera_server_dotnet.exe"
     uv run pytest tests/test_camera_conformance.py -q
+
+Manual hardware run (an IDS camera attached, spec task 5.4): the same suite against the real
+camera. ``PUSHNAV_CONFORMANCE_BACKEND=ids`` starts the exe with ``--backend ids`` instead of
+``--backend fake``; the tests that only make sense for the fake backend (sample-image size,
+backend name) are skipped::
+
+    $env:PUSHNAV_CONFORMANCE_SERVER = "camera\\windows-dotnet\\publish\\camera_server_dotnet.exe"
+    $env:PUSHNAV_CONFORMANCE_BACKEND = "ids"
+    uv run pytest tests/test_camera_conformance.py -q
 """
 
 from __future__ import annotations
@@ -57,6 +66,7 @@ from evf.engine.frame_buffer import LatestFrame
 from tests.mock_camera_server import MockCameraServer
 
 _SERVER_ENV = "PUSHNAV_CONFORMANCE_SERVER"
+_BACKEND_ENV = "PUSHNAV_CONFORMANCE_BACKEND"
 _SAMPLES = Path(__file__).parent / "samples"
 _TIMEOUT = 10.0
 
@@ -64,6 +74,20 @@ _TIMEOUT = 10.0
 def _exe_path() -> Path | None:
     value = os.environ.get(_SERVER_ENV, "").strip()
     return Path(value) if value else None
+
+
+def _exe_backend() -> str:
+    """Backend the exe is started with: ``fake`` (default, CI) or ``ids`` (real camera, manual)."""
+    value = os.environ.get(_BACKEND_ENV, "fake").strip().lower()
+    return value or "fake"
+
+
+def _exe_args(port: int) -> list[str]:
+    backend = _exe_backend()
+    args = ["--backend", backend, "--port", str(port)]
+    if backend == "fake":
+        args += ["--fake-images", str(_SAMPLES)]
+    return args
 
 
 _SERVER_KINDS = ["mock"] + (["exe"] if _exe_path() else [])
@@ -92,7 +116,7 @@ def _start_exe(exe: Path) -> ServerHandle:
         pytest.fail(f"{_SERVER_ENV} points at a missing file: {exe}")
     port = _free_port()
     proc = subprocess.Popen(
-        [str(exe), "--backend", "fake", "--fake-images", str(_SAMPLES), "--port", str(port)],
+        [str(exe), *_exe_args(port)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -125,9 +149,14 @@ def _start_exe(exe: Path) -> ServerHandle:
 
 def _stop_exe(handle: ServerHandle) -> None:
     proc = handle.process
-    if proc.poll() is None:
+    # The server exits by itself once its client is gone. Give it that moment before killing it: a real
+    # camera must be closed cleanly, and a hard kill in the middle of the driver's teardown can take
+    # a long time to complete.
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
         proc.kill()
-    proc.wait(timeout=5)
+    proc.wait(timeout=30)
 
 
 @pytest.fixture(params=_SERVER_KINDS)
@@ -158,6 +187,14 @@ def exe_server():
         yield handle
     finally:
         _stop_exe(handle)
+
+
+@pytest.fixture
+def fake_exe_server(exe_server):
+    """The C# server on the fake backend: for tests that know the sample images (skipped for a real camera)."""
+    if _exe_backend() != "fake":
+        pytest.skip(f"needs {_BACKEND_ENV}=fake (knows the fake backend's sample images)")
+    return exe_server
 
 
 # -- helpers ----------------------------------------------------------------
@@ -332,8 +369,8 @@ class TestPythonClient:
 
 
 class TestCSharpServerBehavior:
-    def test_hello_names_the_backend_and_the_real_stream_size(self, exe_server):
-        with exe_server.connect() as sock:
+    def test_hello_names_the_backend_and_the_real_stream_size(self, fake_exe_server):
+        with fake_exe_server.connect() as sock:
             hello, _ = _handshake(sock)
             payload, _ = _read_until(sock, MSG_FRAME)
         assert hello["backend"] == "windows-dotnet-fake"
@@ -397,7 +434,7 @@ class TestCSharpServerBehavior:
             pytest.skip(f"needs {_SERVER_ENV} (C# camera server behaviour)")
         port = _free_port()
         proc = subprocess.Popen(
-            [str(exe), "--backend", "fake", "--fake-images", str(_SAMPLES), "--port", str(port), "--log-level", "debug"],
+            [str(exe), *_exe_args(port), "--log-level", "debug"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
