@@ -734,10 +734,11 @@ adding a new workflow:
 | Q6 | Do the OV9281 modules support `KSPROPERTY_CAMERACONTROL_EXTENDED_EXPOSUREMODE` (µs exposure) under the inbox UVC driver, or only log2 steps? | Sebastian + OV9281 module | No |
 | Q7 | Does the uEye driver release the camera after `TerminateProcess` without `is_ExitCamera` (Python's `process.terminate()` on Windows)? Verify by kill + respawn. | camera | No |
 | Q8 | ~~OK to runtime-load the user-installed, proprietary `ueye_api_64.dll` from GPL-3 code (no redistribution)?~~ **Resolved 2026-11-18: yes, documented per §3.4 (task 6.4).** | Sebastian | — |
-| Q9 | Is the WIC JPEG encoder within the 15 ms budget for 1936x1216 GRAY8? If not, switch to static libjpeg-turbo. | measurement | No |
+| Q9 | ~~Is the WIC JPEG encoder within the 15 ms budget for 1936x1216 GRAY8? If not, switch to static libjpeg-turbo.~~ **Resolved 2026-11-18 (task 4.3): yes, median 3.6 ms at 1936x1216 and 0.95 ms at 968x608 (Release, dev laptop); no fallback needed.** | measurement | No |
 | Q10 | **[HW: OV9281]** With the default `"dotnet"`, how much later does an OV9281 user get frames than with `"c"`? The delay covers the C# start, MF enumeration, code-3 exit and the C server start. Target: about 1 s or less (§8.3). | Sebastian + OV9281 module | No |
 | Q11 | Should the optional C# UVC backend ever become the default for OV9281 (`camera.dotnet_uvc = true`)? Proposed: no decision now; the C server stays the default path for UVC. | Sebastian, later | No |
 | Q12 | Add the server choice to the Settings UI (task 6.7)? Proposed: optional, later. | Sebastian | No |
+| Q13 | ~~Longest exposure a v1 client may set: the sensor allows 30 s, the engine's v1 stall timeout is a fixed 2.0 s.~~ **Resolved (review of tasks 1-4): the v1 view caps exposure at 1.5 s and clamps SET_CONTROL to it (`V1ControlAdapter`). v2 sessions are not capped (adaptive stall timeout, protocol §11.7).** | — | No |
 
 ---
 
@@ -749,31 +750,31 @@ C# server) needs the protocol v2 section approved and lands together with
 camera. **[INFRA]** = route to the infra agent.
 
 ### 1. Skeleton
-- [ ] 1.1 Create `camera/windows-dotnet/` solution, `global.json`, `Directory.Build.props` (net10.0-windows, AOT, trim/AOT warnings as errors). Test: `dotnet build` clean.
-- [ ] 1.2 `Program.cs` with `--port/--backend/--list/--log-level`, exit codes 0/1/3. Test: xUnit for arg parsing; `--backend fake --list` prints JSON.
-- [ ] 1.3 AOT publish script `build.bat`/`build.ps1` -> `publish/camera_server_dotnet.exe`. Test: exe runs `--list` on a clean machine without the .NET runtime.
+- [x] 1.1 Create `camera/windows-dotnet/` solution, `global.json`, `Directory.Build.props` (net10.0-windows, AOT, trim/AOT warnings as errors). Test: `dotnet build` clean. *(Done: the `Microsoft.DotNet.ILCompiler` pack is pinned to 10.0.15 via `KnownILCompilerPack`, because SDK 10.0.301 bundles 10.0.9, which NuGet audit flags and warnings are errors.)*
+- [x] 1.2 `Program.cs` with `--port/--backend/--list/--log-level`, exit codes 0/1/3. Test: xUnit for arg parsing; `--backend fake --list` prints JSON. *(Done: bad command line exits with 2, `--port 0` picks a free port.)*
+- [x] 1.3 AOT publish script `build.bat`/`build.ps1` -> `publish/camera_server_dotnet.exe`. Test: exe runs `--list` on a clean machine without the .NET runtime. *(Done: `build.bat` wraps `build.ps1`; exe is 3.3 MB and imports only OS DLLs.)*
 
 ### 2. Protocol v1 core
-- [ ] 2.1 Envelope + message types + System.Text.Json source-gen models. Test: xUnit round trips; > 16 MB rejected.
-- [ ] 2.2 Single-client TCP server, HELLO exchange, CONTROL_INFO after handshake and after every SET_CONTROL, GET_CONTROLS, unknown types ignored, exit after disconnect. Test: xUnit with a loopback client.
-- [ ] 2.3 Latest-frame slot + writer (no queue). Test: slow-reader test shows no backlog (only newest frame delivered).
+- [x] 2.1 Envelope + message types + System.Text.Json source-gen models. Test: xUnit round trips; > 16 MB rejected.
+- [x] 2.2 Single-client TCP server, HELLO exchange, CONTROL_INFO after handshake and after every SET_CONTROL, GET_CONTROLS, unknown types ignored, exit after disconnect. Test: xUnit with a loopback client.
+- [x] 2.3 Latest-frame slot + writer (no queue). Test: slow-reader test shows no backlog (only newest frame delivered).
 
 ### 3. Fake backend + conformance
-- [ ] 3.1 `FakeBackend`: replays `--fake-images` (PNG -> GRAY8 -> JPEG) or a synthetic star field; simulated exposure/gain/fps/binning with IDS-like ranges. Test: xUnit.
-- [ ] 3.2 `tests/test_camera_conformance.py` (v1 vectors) parametrized over the Python mock and `PUSHNAV_CONFORMANCE_SERVER`. Test: passes locally against the mock and the C# exe.
+- [x] 3.1 `FakeBackend`: replays `--fake-images` (PNG -> GRAY8 -> JPEG) or a synthetic star field; simulated exposure/gain/fps/binning with IDS-like ranges. Test: xUnit.
+- [x] 3.2 `tests/test_camera_conformance.py` (v1 vectors) parametrized over the Python mock and `PUSHNAV_CONFORMANCE_SERVER`. Test: passes locally against the mock and the C# exe. *(Done: 24 passed against the mock and the published exe; 9 passed + 6 exe-only skipped with the mock alone.)*
 - [ ] 3.3 Engine smoke: run the app with `PUSHNAV_CAMERA_SERVER=dotnet` and the fake backend (dev flag), solver solves `tests/samples` frames. Test: manual + log check.
 
 ### 4. Imaging
-- [ ] 4.1 WIC JPEG encoder (GRAY8, quality param) via CsWin32 COM, AOT-clean. Test: xUnit round trip error bound.
-- [ ] 4.2 YUY2/NV12 -> GRAY8 conversion. Test: xUnit with known patterns.
-- [ ] 4.3 Encoder benchmark (1936x1216 and 968x608). Test: reported numbers meet §3.3 or open the libjpeg-turbo fallback (Q9).
+- [x] 4.1 WIC JPEG encoder (GRAY8, quality param) via CsWin32 COM, AOT-clean. Test: xUnit round trip error bound.
+- [x] 4.2 YUY2/NV12 -> GRAY8 conversion. Test: xUnit with known patterns.
+- [x] 4.3 Encoder benchmark (1936x1216 and 968x608). Test: reported numbers meet §3.3 or open the libjpeg-turbo fallback (Q9). *(Done, within budget: WIC q90 median 3.6 ms at 1936x1216 and 0.95 ms at 968x608 in Release, so no libjpeg-turbo fallback; Q9 answered.)*
 
 ### 5. IDS backend
 - [ ] 5.1 `UEyeNative` `[LibraryImport]` declarations + `NativeLibrary.TryLoad`; backend unavailable if DLL missing. Test: xUnit on a machine without the DLL (CI) -> `Probe()` returns [].
 - [ ] 5.2 `IUEyeApi` seam + fake; pixel-clock policy, exposure priority, long-exposure switch, timeout -> fatal. Test: xUnit.
 - [ ] 5.3 Probe/open: camera list, Mono8, auto features off, buffers, image queue, capture. Test **[HW]**: `--backend ids --list` shows `UI306xCP-M`, 1936x1216, controls.
 - [ ] 5.4 Capture loop + JPEG frames over TCP (v1). Test **[HW]**: conformance suite against the real camera; app shows live image.
-- [ ] 5.5 v1 controls (`exposure` in `"100us"`, `gain` raw 0–100). Test **[HW]**: sliders change brightness; CONTROL_INFO reflects applied values.
+- [ ] 5.5 v1 controls (`exposure` in `"100us"`, `gain` raw 0–100). Test **[HW]**: sliders change brightness; CONTROL_INFO reflects applied values. *(Note: the v1 view caps `exposure` at 1.5 s = 15000 units, `V1ControlAdapter.MaxExposureMicroseconds`, and clamps SET_CONTROL to it, because the engine's fixed 2.0 s stall timeout would otherwise restart the server; protocol v2 lifts it, see Q13. Already implemented and tested in the adapter.)*
 - [ ] 5.6 Device removal -> exit(1); engine recovers when re-plugged. Test **[HW]**: unplug/replug during streaming.
 - [ ] 5.7 Exit code 3 when no supported camera is present. Exit 3 immediately when only an allowlisted UVC camera is seen and UVC is disabled (§8.3; needs the MF enumeration from task 6.2a). Test: xUnit (fake device lists) + manual without camera.
 - [ ] 5.8 Kill/respawn without `is_ExitCamera` (Q7). Test **[HW]**: `taskkill /F` then restart, camera opens.
