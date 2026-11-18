@@ -54,7 +54,7 @@ internal static class CameraServerApp
         {
             return options.List
                 ? List(options, backends, stdout, log)
-                : Serve(options, backends, stdout, stderr, log, stop, seams);
+                : Serve(options, backends, stdout, log, stop, seams);
         }
         finally
         {
@@ -62,6 +62,9 @@ internal static class CameraServerApp
             {
                 backend.Dispose();
             }
+
+            // Queued log lines (a fatal error, "no camera found") get a bounded chance to reach stderr before exit.
+            log.Flush(TimeSpan.FromSeconds(1));
         }
     }
 
@@ -82,7 +85,6 @@ internal static class CameraServerApp
         CommandLineOptions options,
         IReadOnlyList<ICameraBackend> backends,
         TextWriter stdout,
-        TextWriter stderr,
         Logger log,
         CancellationToken stop,
         Seams seams)
@@ -103,7 +105,7 @@ internal static class CameraServerApp
             }
 
             string probed = backends.Count == 0 ? "none registered" : string.Join(", ", backends.Select(b => b.Id));
-            stderr.WriteLine(
+            log.Error(
                 "No supported camera found (backends probed: " + probed + "). Check the USB connection and that the " +
                 "camera is recognized by Windows. For IDS cameras the IDS Software Suite must be installed.");
             return ExitCodes.NoSupportedCamera;

@@ -13,8 +13,9 @@ The same tests run against every camera server we can start:
   Linux/macOS runs stay green and quiet).
 
 Tests in ``TestCSharpServerBehavior`` cover things only the C# server promises (exit
-after disconnect, ERROR on a version mismatch, real stream size in HELLO, ...); they
-only get the ``exe`` parametrization.
+after disconnect, ERROR on a version mismatch, real stream size in HELLO, undrained
+stderr pipes, ...). They need ``PUSHNAV_CONFORMANCE_SERVER`` and are *skipped* without
+it, so a plain run only exercises the mock.
 
 Run against the published exe::
 
@@ -382,3 +383,69 @@ class TestCSharpServerBehavior:
             sock.sendall(encode_json_message(MSG_SET_CONTROL, {"id": "gain", "value": 7}))
             payload, _ = _read_until(sock, MSG_CONTROL_INFO)
         assert _controls_by_id(json.loads(payload))["gain"]["cur"] == 7
+
+    def test_undrained_stdout_stderr_pipes_never_block_the_session(self):
+        """Regression: the engine spawns the server with PIPEs and never reads them.
+
+        A Windows pipe holds only a few KB. The server used to log every SET_CONTROL
+        synchronously, so after ~170 of them the session thread blocked on stderr and
+        the server neither answered nor exited. Run with ``--log-level debug`` (every
+        control logs) and nothing reading the pipes, like ``SubprocessManager``.
+        """
+        exe = _exe_path()
+        if exe is None:
+            pytest.skip(f"needs {_SERVER_ENV} (C# camera server behaviour)")
+        port = _free_port()
+        proc = subprocess.Popen(
+            [str(exe), "--backend", "fake", "--fake-images", str(_SAMPLES), "--port", str(port), "--log-level", "debug"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            # Nothing may read proc.stdout / proc.stderr. Wait for the port by retrying the real
+            # connect (a bare probe connection would make the single-client server exit).
+            sock = None
+            deadline = time.monotonic() + 20.0
+            while sock is None:
+                try:
+                    sock = socket.create_connection(("127.0.0.1", port), timeout=_TIMEOUT)
+                except OSError:
+                    assert proc.poll() is None, "server exited before listening"
+                    assert time.monotonic() < deadline, "server never listened"
+                    time.sleep(0.1)
+            sock.settimeout(_TIMEOUT)
+            with sock:
+                _handshake(sock)
+                counts = {"control_info": 0, "frames": 0}
+
+                def read_all():
+                    try:
+                        while True:
+                            msg_type, _ = read_message(sock)
+                            if msg_type == MSG_CONTROL_INFO:
+                                counts["control_info"] += 1
+                            elif msg_type == MSG_FRAME:
+                                counts["frames"] += 1
+                    except (DisconnectError, OSError):
+                        pass
+
+                reader = threading.Thread(target=read_all, daemon=True)
+                reader.start()
+                n = 1000
+                for i in range(n):
+                    control_id = "gain" if i % 7 else "no_such_control"  # also the unknown-control path
+                    sock.sendall(encode_json_message(MSG_SET_CONTROL, {"id": control_id, "value": i % 100}))
+                    time.sleep(0.002)
+                deadline = time.monotonic() + 10.0
+                while counts["control_info"] < n and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                assert counts["control_info"] == n, f"only {counts['control_info']} of {n} CONTROL_INFO answers"
+                frames_before = counts["frames"]
+                time.sleep(1.0)
+                assert counts["frames"] > frames_before, "frames stopped flowing"
+            # The client is gone: the server must exit by itself (not hang on a blocked log write).
+            assert proc.wait(timeout=10) == 0
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)

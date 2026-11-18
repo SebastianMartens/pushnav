@@ -10,10 +10,10 @@ internal sealed class ServerHarness : IDisposable
 {
     private readonly CancellationTokenSource _stop = new();
 
-    private ServerHarness(StubBackend backend, TimeSpan? handshakeTimeout)
+    private ServerHarness(StubBackend backend, TimeSpan? handshakeTimeout, Logger? log)
     {
         Backend = backend;
-        Log = new Logger(TextWriter.Null, LogLevel.Debug);
+        Log = log ?? new Logger(TextWriter.Null, LogLevel.Debug);
         Slot = new LatestFrameSlot();
         Server = new CameraTcpServer(backend, Slot, Log, port: 0, handshakeTimeout: handshakeTimeout);
         Server.Start();
@@ -33,8 +33,8 @@ internal sealed class ServerHarness : IDisposable
     /// <summary>Completes with the process exit code the server would return.</summary>
     public Task<int> Exit { get; }
 
-    public static ServerHarness Start(StubBackend? backend = null, TimeSpan? handshakeTimeout = null) =>
-        new(backend ?? new StubBackend(), handshakeTimeout);
+    public static ServerHarness Start(StubBackend? backend = null, TimeSpan? handshakeTimeout = null, Logger? log = null) =>
+        new(backend ?? new StubBackend(), handshakeTimeout, log);
 
     public LoopbackClient Connect(int receiveTimeoutMs = 10_000) => LoopbackClient.Connect(Server.Port, receiveTimeoutMs);
 

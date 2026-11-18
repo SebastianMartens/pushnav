@@ -85,6 +85,34 @@ public class CameraTcpServerTests
     }
 
     [Fact]
+    public void SessionKeepsWorkingWhenTheLogOutputIsStuck()
+    {
+        // Regression: the engine never reads the server's stderr pipe; a blocking log write froze the session reader.
+        var stuck = new BlockedWriter();
+        var log = new Logger(stuck, LogLevel.Debug); // debug: every SET_CONTROL logs, the worst case
+        using var h = ServerHarness.Start(new StubBackend(TimeSpan.FromMilliseconds(20)), log: log);
+        using var client = h.Connect();
+        client.Handshake();
+
+        int answered = 0;
+        for (int i = 0; i < 1000; i++)
+        {
+            client.SetControl(i % 7 == 0 ? "unknown_control" : "gain", i % 100);
+            while (client.Read().Type != MessageType.ControlInfo)
+            {
+            }
+
+            answered++;
+        }
+
+        Assert.Equal(1000, answered);
+        Assert.True(log.DroppedCount > 0, "the stuck sink should have cost log lines, not the session");
+        client.Dispose();
+        Assert.Equal(ExitCodes.Ok, h.WaitForExit()); // and the server still exits after the client leaves
+        stuck.Release();
+    }
+
+    [Fact]
     public void ControlInfoReportsTheClampedValueNotTheRequestedOne()
     {
         using var h = ServerHarness.Start();

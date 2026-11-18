@@ -86,9 +86,10 @@ internal sealed class ClientSession
                 _ended = true;
             }
 
+            // Cancelling closes the socket (see the registration above), which also unblocks a writer stuck in a
+            // send. A final ERROR has already shut down the sending side in SendFinalError, so it is not cut off.
             sessionCts.Cancel();
-            ShutdownSendQuietly(_socket); // let a final ERROR reach the client before the close
-            CloseQuietly(_socket); // unblocks a writer stuck in a socket write
+            CloseQuietly(_socket); // idempotent; covers sessions that ended without the token firing
             writer?.Join(TimeSpan.FromSeconds(2));
         }
     }
@@ -287,21 +288,21 @@ internal sealed class ClientSession
                 var result = _backend.SetControl(command.Id, native);
                 if (!result.Accepted)
                 {
-                    _log.Warn($"SET_CONTROL {command.Id}={command.Value} rejected: {result.Message}");
+                    _log.Debug($"SET_CONTROL {command.Id}={command.Value} rejected: {result.Message}");
                 }
                 else
                 {
-                    _log.Info($"Set {command.Id} = {command.Value}");
+                    _log.Debug($"Set {command.Id} = {command.Value}");
                 }
             }
             catch (CameraException ex)
             {
-                _log.Error($"SET_CONTROL {command.Id} failed: {ex.Message}");
+                _log.Warn($"SET_CONTROL {command.Id} failed: {ex.Message}");
             }
         }
         else
         {
-            _log.Warn($"Unknown control: {command.Id}");
+            _log.Debug($"Unknown control: {command.Id}");
         }
 
         // Always answer with the applied state, even if nothing changed (spec 5.1: CONTROL_INFO after every SET_CONTROL).

@@ -124,6 +124,7 @@ internal sealed class CameraTcpServer : IDisposable
         _log.Error($"Fatal: {message}");
         _session?.SendFinalError(message);
         _fatalCts.Cancel();
+        _log.Flush(TimeSpan.FromMilliseconds(500)); // best effort: the process exits right after, never wait for a stuck pipe
     }
 
     public void Dispose()
