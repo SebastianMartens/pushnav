@@ -91,6 +91,7 @@ python/evf/                     # main Python package
   main.py                       # entry point — engine + pywebview
   paths.py                      # centralized path resolution (dev vs release bundles)
   network.py                    # shared LAN-IP probe used by webserver + engine
+  ui_notify.py                  # native error dialog for fatal start-up errors (windowed mode only)
   engine/                       # core engine, state machine, threading
     engine.py                   # main engine (owns all subsystems)
     state.py                    # state machine

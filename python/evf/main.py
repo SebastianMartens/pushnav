@@ -29,7 +29,10 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+from pathlib import Path
 
+from evf import ui_notify
+from evf.config.logging_setup import setup_logging
 from evf.config.manager import ConfigManager
 from evf.engine.debug_pin import debug_flag_set
 from evf.engine.engine import Engine
@@ -72,13 +75,11 @@ def _vite_running(port: int = 5173) -> bool:
         return False
 
 
-def _check_single_instance(port: int) -> None:
-    """Exit cleanly if another PushNav (or anything) is already on `port`.
+def _identify_port_occupant(port: int) -> str | None:
+    """Return None if `port` is free, else "pushnav" or "other".
 
-    Runs before any engine threads, port binds, or pywebview windows
-    open. Distinguishes "another PushNav" from "another app on the
-    port" by hitting our /api/version identifier endpoint, so the
-    error message can tell the user what to do.
+    Distinguishes "another PushNav" from "another app on the port" by
+    hitting our /api/version identifier endpoint.
     """
     # Fast TCP probe first — if the port is free, the slow HTTP probe
     # would just time out. Use 127.0.0.1 explicitly: webserver binds
@@ -87,39 +88,68 @@ def _check_single_instance(port: int) -> None:
         with socket.create_connection(("127.0.0.1", port), timeout=0.3):
             pass  # something is bound
     except OSError:
-        return  # port free, fine to start
+        return None  # port free, fine to start
 
     # Port is busy. Identify the occupant.
-    is_pushnav = False
     try:
         with urllib.request.urlopen(
             f"http://127.0.0.1:{port}/api/version", timeout=0.5
         ) as r:
             if r.status == 200:
                 payload = json.loads(r.read(512))
-                is_pushnav = payload.get("app") == "pushnav"
+                if payload.get("app") == "pushnav":
+                    return "pushnav"
     except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError):
         pass
+    return "other"
 
-    if is_pushnav and os.environ.get("PUSHNAV_ROOT"):
+
+def _port_conflict_message(port: int, occupant: str, config_path: Path | str) -> str:
+    """Build the user-facing text for a busy web port.
+
+    `occupant` is "pushnav" or "other" (see `_identify_port_occupant`).
+    """
+    if occupant == "pushnav" and os.environ.get("PUSHNAV_ROOT"):
         # pushnav-headless .deb: the other instance is almost always the service.
-        msg = (
+        return (
             f"PushNav is already running on port {port} "
             f"(probably the pushnav-headless service).\n"
             f"Stop it first with: sudo systemctl stop pushnav-headless"
         )
-    elif is_pushnav:
-        msg = (
+    if occupant == "pushnav":
+        return (
             f"PushNav is already running on port {port}.\n"
             f"Close the existing window before launching another instance."
         )
+    return (
+        f"Port {port} is in use by another application.\n"
+        f"Close that application, or change webserver.port (the \"port\" key "
+        f"in the \"webserver\" section) in the PushNav config file:\n"
+        f"{config_path}"
+    )
+
+
+def _check_single_instance(
+    port: int, config_path: Path | str, *, no_window: bool = False
+) -> None:
+    """Exit with status 1 if another PushNav (or anything) is already on `port`.
+
+    Runs before any engine threads, port binds, or pywebview windows
+    open. The conflict is logged; in windowed mode it is also shown in a
+    native error dialog (the windowed builds have no console), while
+    headless mode (--no-window: Raspberry Pi service) only prints to
+    stderr — nobody could dismiss a dialog there.
+    """
+    occupant = _identify_port_occupant(port)
+    if occupant is None:
+        return
+
+    msg = _port_conflict_message(port, occupant, config_path)
+    logger.error("Cannot start: %s", msg.replace("\n", " "))
+    if no_window:
+        print(msg, file=sys.stderr)
     else:
-        msg = (
-            f"Port {port} is in use by another application.\n"
-            f"Close it, or change webserver.port in your PushNav config "
-            f"(see logs for the config file location)."
-        )
-    print(msg, file=sys.stderr)
+        ui_notify.show_error("PushNav", msg)  # falls back to stderr itself
     sys.exit(1)
 
 
@@ -144,9 +174,12 @@ def main() -> None:
 
     # Single-instance guard. Reads config first (we need web_port for the
     # probe) and reuses the same ConfigManager for the engine, so it isn't
-    # loaded twice from disk.
+    # loaded twice from disk. Logging goes up before the check so a port
+    # conflict lands in evf.log (engine.startup_logging() below re-runs the
+    # same setup and logs the version banner).
     config = ConfigManager()
-    _check_single_instance(config.web_port)
+    setup_logging(verbose=config.verbose, console=True)
+    _check_single_instance(config.web_port, config.path, no_window=no_window)
 
     engine = Engine(dev_mode=dev_mode, config=config)
 
