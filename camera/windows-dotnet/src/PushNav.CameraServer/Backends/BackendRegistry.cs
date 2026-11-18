@@ -2,6 +2,7 @@
 // This file is part of PushNav (camera server, C# / .NET).
 
 using PushNav.CameraServer.Backends.Fake;
+using PushNav.CameraServer.Backends.Ids;
 using PushNav.CameraServer.Cli;
 
 namespace PushNav.CameraServer.Backends;
@@ -12,11 +13,20 @@ namespace PushNav.CameraServer.Backends;
 /// </summary>
 internal static class BackendRegistry
 {
-    public static IReadOnlyList<ICameraBackend> Create(CommandLineOptions options, Logger log)
+    public static IReadOnlyList<ICameraBackend> Create(CommandLineOptions options, Logger log) =>
+        Create(options, log, () => IdsBackend.CreateDefault(options.JpegQuality, log));
+
+    /// <summary>The registry with the IDS backend supplied by <paramref name="createIds"/> (tests pass one without the uEye API).</summary>
+    public static IReadOnlyList<ICameraBackend> Create(CommandLineOptions options, Logger log, Func<IdsBackend> createIds)
     {
         var backends = new List<ICameraBackend>();
 
-        // IDS (spec 5) and UVC (spec 6) are registered here by their own tasks, in this order.
+        // IDS (spec 5), then UVC (spec 6, registered by its own task). `--backend` limits the list to one backend.
+        if (options.Backend is null or IdsBackend.BackendId)
+        {
+            backends.Add(createIds());
+        }
+
         if (options.Backend == FakeBackend.BackendId)
         {
             backends.Add(new FakeBackend(options.FakeImagesDirectory, options.JpegQuality, log));

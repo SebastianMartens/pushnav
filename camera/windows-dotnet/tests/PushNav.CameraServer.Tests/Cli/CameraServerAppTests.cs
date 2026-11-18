@@ -4,6 +4,7 @@
 using System.Text.Json;
 using PushNav.CameraServer.Backends;
 using PushNav.CameraServer.Backends.Fake;
+using PushNav.CameraServer.Backends.Ids;
 
 namespace PushNav.CameraServer.Tests.Cli;
 
@@ -13,7 +14,13 @@ public class CameraServerAppTests
     {
         var stdout = new StringWriter();
         var stderr = new StringWriter();
-        int code = CameraServerApp.Run(args, stdout, stderr, CancellationToken.None, new CameraServerApp.Seams { Delay = _ => { } });
+        // Never touch a real camera: the IDS backend runs without the uEye API (as on a machine without the IDS Software Suite).
+        var seams = new CameraServerApp.Seams
+        {
+            Delay = _ => { },
+            BackendFactory = (o, log) => BackendRegistry.Create(o, log, () => new IdsBackend(null, o.JpegQuality, log)),
+        };
+        int code = CameraServerApp.Run(args, stdout, stderr, CancellationToken.None, seams);
         return (code, stdout.ToString(), stderr.ToString());
     }
 
@@ -77,15 +84,23 @@ public class CameraServerAppTests
         Assert.Contains("No supported camera found", stderr);
     }
 
-    [Theory]
-    [InlineData("ids")]
-    [InlineData("uvc")]
-    public void ForcingABackendThatIsNotBuiltInExitsWithCode3(string backend)
+    [Fact]
+    public void ForcingTheUvcBackendThatIsNotBuiltInExitsWithCode3()
     {
-        var (code, _, stderr) = Run("--backend", backend, "--port", "0");
+        var (code, _, stderr) = Run("--backend", "uvc", "--port", "0");
 
         Assert.Equal(ExitCodes.NoSupportedCamera, code);
-        Assert.Contains($"'{backend}'", stderr);
+        Assert.Contains("'uvc'", stderr);
+    }
+
+    [Fact]
+    public void ForcingTheIdsBackendWithoutTheUEyeApiExitsWithCode3()
+    {
+        var (code, _, stderr) = Run("--backend", "ids", "--port", "0");
+
+        Assert.Equal(ExitCodes.NoSupportedCamera, code);
+        Assert.Contains("No supported camera found", stderr);
+        Assert.Contains("IDS Software Suite", stderr);
     }
 
     [Fact]

@@ -28,6 +28,7 @@ import threading
 import time
 from pathlib import Path
 
+from evf.camera import server_select  # fork: camera-server-dotnet (see specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md section 8)
 from evf.camera.client import CameraClient
 from evf.config.manager import ConfigManager
 from evf.engine.frame_buffer import LatestFrame
@@ -61,7 +62,18 @@ class SubprocessManager:
         self._frame_buffer = frame_buffer
         self._state_machine = state_machine
         self._config = config
-        self._binary_path: Path = self._resolve_binary(binary_path)
+        # fork: camera-server-dotnet (see specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md section 8)
+        # Windows only; an explicit binary_path (tests, dev) bypasses the selection.
+        self._server_plan = (
+            server_select.build_plan(config.get("camera", "windows_server"))
+            if binary_path is None else None
+        )
+        self._binary_path: Path = (
+            self._server_plan.current.path if self._server_plan
+            else self._resolve_binary(binary_path)
+        )
+        # The server this attempt runs: the plan's current one, or the C fallback after exit code 3.
+        self._fork_running = self._server_plan.current if self._server_plan else None
         self._host = host
         self._port = port
         self._process: subprocess.Popen | None = None
@@ -82,6 +94,8 @@ class SubprocessManager:
         self._stop_event.clear()
         self._spawn_process()
         hello = self._connect_with_retry()
+        self._fork_remember_connected()
+        self._fork_log_server(hello)
         self._client.start_receiving()
         self._start_monitor()
         return hello
@@ -137,11 +151,13 @@ class SubprocessManager:
                 # CREATE_NO_WINDOW: the released app is console-less
                 # (--windows-console-mode=disable), so spawning the console app
                 # taskkill.exe without it pops a brief black window on startup.
-                subprocess.run(
-                    ["taskkill", "/F", "/IM", name],
-                    capture_output=True, timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
+                # fork: camera-server-dotnet (spec section 8.4): kill both Windows servers
+                for stale_name in server_select.stale_process_names(name):
+                    subprocess.run(
+                        ["taskkill", "/F", "/IM", stale_name],
+                        capture_output=True, timeout=5,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
             else:
                 subprocess.run(
                     ["pkill", "-f", name],
@@ -181,6 +197,7 @@ class SubprocessManager:
         self._kill_stale_server()
         path = str(self._binary_path)
         cmd = [sys.executable, path] if path.endswith(".py") else [path]
+        cmd += self._fork_server_args()  # fork: camera-server-dotnet
         kwargs = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -212,6 +229,10 @@ class SubprocessManager:
             # Bail early if the server process already exited
             if self._process is not None and self._process.poll() is not None:
                 rc = self._process.returncode
+                # fork: camera-server-dotnet (spec section 8.2): exit code 3 -> start the C server in this attempt
+                if self._fork_fall_back_to_c_server(rc):
+                    deadline = time.monotonic() + self._PORT_TIMEOUT
+                    continue
                 stderr_text = ""
                 try:
                     _, stderr_bytes = self._process.communicate(timeout=1)
@@ -323,8 +344,10 @@ class SubprocessManager:
                     self._terminate_process()
                     if self._stop_event.is_set():
                         return
+                    self._fork_begin_attempt()
                     self._spawn_process()
                     self._connect_with_retry()
+                    self._fork_remember_connected()
                     self._client.start_receiving()
                     # Restore camera settings from config
                     if self._config.exposure is not None:
@@ -348,3 +371,66 @@ class SubprocessManager:
             self._state_machine.transition(EngineState.ERROR)
         finally:
             self._recovering = False
+
+    # -- fork: camera-server-dotnet (spec section 8) --------------------------
+    # Selection of the Windows camera server (C# default, or C) lives in
+    # evf.camera.server_select; these are the only places SubprocessManager
+    # calls into it besides __init__ and _kill_stale_server.
+
+    def _fork_server_args(self) -> list[str]:
+        """Extra command line for the C# server (PUSHNAV_CAMERA_SERVER_ARGS, dev use)."""
+        running = self._fork_running
+        return server_select.extra_args(running) if running else []
+
+    def _fork_fall_back_to_c_server(self, exit_code: int | None) -> bool:
+        """The C# server found no supported camera (exit code 3): start the C server instead.
+
+        Runs inside the same connect attempt, so it consumes no backoff step. The
+        fallback is remembered only once it has connected (_fork_remember_connected); a
+        fallback that fails too leaves the next attempt starting the C# server again.
+        """
+        plan = self._server_plan
+        fallback = plan.fallback_after_exit(exit_code, self._fork_running) if plan else None
+        if fallback is None:
+            return False
+        stderr_text = ""
+        if self._process is not None:
+            try:
+                _, stderr_bytes = self._process.communicate(timeout=1)
+                if stderr_bytes:
+                    stderr_text = stderr_bytes.decode(errors="replace").strip()
+            except (subprocess.TimeoutExpired, ValueError):
+                pass
+        logger.info(
+            "C# camera server found no supported camera (exit code %s); starting the C server. Stderr: %s",
+            exit_code, stderr_text or "(empty)",
+        )
+        self._process = None
+        self._fork_running = fallback
+        self._binary_path = fallback.path
+        self._spawn_process()
+        return True
+
+    def _fork_begin_attempt(self) -> None:
+        """A new (re)start attempt begins with the remembered server, not with a fallback that failed."""
+        plan = self._server_plan
+        if plan is not None:
+            self._fork_running = plan.current
+            self._binary_path = plan.current.path
+
+    def _fork_remember_connected(self) -> None:
+        """The server that connected is the one recovery attempts start with (spec 8.2)."""
+        if self._server_plan is not None and self._fork_running is not None:
+            self._server_plan.switch_to(self._fork_running)
+
+    def _fork_log_server(self, hello: dict) -> None:
+        """After HELLO: which server answered, and what it drives."""
+        if self._server_plan is None or self._fork_running is None:
+            return
+        logger.info(
+            "Camera server %r (%s): backend=%s camera_model=%s",
+            self._fork_running.name,
+            Path(self._binary_path).name,
+            hello.get("backend"),
+            hello.get("camera_model"),
+        )

@@ -57,6 +57,29 @@ These are reference suppliers. The **OV9281** module itself is widely sold by Ar
 
 >The Waveshare OV9281 combination is the fully verified setup; the other OV9281 modules listed above are in beta, awaiting field results. Support for additional cameras and lenses may be added in the future based on demand and usability. I decided to keep it this way for now to ensure a consistent and reliable user experience. Also this combination is very affordable and widely available, so it should be accessible for most users.
 
+## IDS uEye cameras (Windows, optional)
+
+PushNav also works with **IDS uEye** industrial cameras on Windows. The model it was built and tested with is the **UI-306xCP-M** (USB 3, USB ID `1409:3060`, Sony IMX174 mono sensor, global shutter, 1936 × 1216 pixels, 5.86 µm). Other uEye models are listed and opened with generic defaults but have not been tried.
+
+**What you need**
+
+1. The **IDS Software Suite** from IDS (ids-imaging.com, Downloads). It installs the camera driver and the uEye API runtime (`ueye_api_64.dll`). Version 4.97 is verified. After installing it, the camera shows up in the IDS Camera Manager.
+2. The C# camera server, `camera_server_dotnet.exe`. It is the default camera server on Windows. A source checkout builds it with `camera\windows-dotnet\build.bat` (.NET 10 SDK and the MSVC linker).
+3. Close other programs that use the camera (for example *uEye Cockpit*): only one program can open it at a time.
+
+**Licensing: IDS software is not part of PushNav.** The IDS driver and the uEye runtime are proprietary software of IDS Imaging Development Systems. PushNav does not contain, bundle or redistribute any IDS file. The camera server loads `ueye_api_64.dll` only at run time and only when the IDS Software Suite has put it on your machine; without it the IDS support is simply not available and everything else works as before. The API declarations in PushNav's C# code are written by PushNav and released under the same GPL-3.0-or-later licence as the rest of the project.
+
+**How it behaves**
+
+- The camera runs in 8-bit mono with all automatic exposure, gain and frame-rate features switched off. Frames are sent to the app as grayscale JPEG, about 10 frames per second at the default settings.
+- **Exposure** appears in the app in the same units as for the OV9281 (steps of 0.1 ms, 0.1 ms to 1.5 s). A longer exposure lowers the frame rate by itself so the frame always fits. Beyond about 1 s the sensor switches to its long-exposure mode and stays there until the camera server restarts (leaving that mode would interrupt the picture for about 2.5 s); shorter exposures are still accepted in that mode.
+- **Gain** is the sensor's master gain, 0 to 100.
+- If the camera is unplugged the camera server stops and the app keeps trying to reconnect for a minute or more. If the camera is back only after that, use the app's *Retry camera* button.
+
+**Choosing the camera server.** The default `"dotnet"` starts the C# server first and falls back to the original C server when the C# server finds no supported camera (that is how the OV9281 modules keep working). To force one of them set `camera.windows_server` to `"dotnet"` or `"c"` in the config file, or set the environment variable `PUSHNAV_CAMERA_SERVER` for a single run. `camera_server_dotnet.exe --list` prints the cameras it sees and their controls as JSON, which is the first thing to check when a camera is not found.
+
+**Lens and plate solving.** The reference setup is a 25 mm lens on this sensor, a field of 25.6° × 16.2°. The star catalog shipped with PushNav is built for a 7° to 10° field, so plate solving with this camera needs a wide-field catalog that does not exist yet (tracked in [issue #3](https://github.com/SebastianMartens/pushnav/issues/3)). Until then the camera shows its live image in the app but will not solve.
+
 ## Adding Support for More Cameras
 
 - Adding the camera's VID/PID to the camera server's supported device list and implementing any necessary quirks for frame capture (if required)

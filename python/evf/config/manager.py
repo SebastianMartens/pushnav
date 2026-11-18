@@ -30,7 +30,9 @@ CONFIG_VERSION = 1
 DEFAULT_CONFIG = {
     "version": CONFIG_VERSION,
     "solver": {"min_matches": 8, "max_prob": 0.2},
-    "camera": {"exposure": None, "gain": None, "extra_camera_ids": []},
+    # fork: camera-server-dotnet (see specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md section 8.1)
+    # windows_server: "dotnet" (C# camera server, default) or "c" (C/DirectShow); Windows only.
+    "camera": {"exposure": None, "gain": None, "extra_camera_ids": [], "windows_server": "dotnet"},
     "calibration": {"finder_rotation": 0.0, "sync_d_body": None},
     "logging": {"verbose": False},
     "audio": {"enabled": True},
