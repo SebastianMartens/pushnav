@@ -83,3 +83,73 @@ jobs:
       # run: it has pre-existing errors.
       - name: Build
         run: npm run build
+
+  # C# camera server (camera/windows-dotnet/, spec SPEC_CAMERA_SERVER_WINDOWS.md
+  # section 10.3). Nothing here needs IDS hardware or the IDS driver: the xUnit
+  # tests script the IDS API, and the conformance suite starts the published exe
+  # with --backend fake. AOT/trim warnings and NuGet audit advisories are build
+  # errors (Directory.Build.props), so do not add suppressions to get this green.
+  camera-server-windows:
+    name: Camera server (C#, Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+    steps:
+      - uses: actions/checkout@v4
+
+      # SDK version comes from global.json (setup-dotnet's own `cache: true`
+      # needs a packages.lock.json, which the projects don't have, so the
+      # NuGet cache is a plain actions/cache below).
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: camera/windows-dotnet/global.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('camera/windows-dotnet/global.json', 'camera/windows-dotnet/Directory.Build.props', 'camera/windows-dotnet/**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Unit tests (xUnit)
+        run: dotnet test camera/windows-dotnet/PushNav.CameraServer.slnx -c Release
+
+      # The Native AOT linker needs MSVC. build.ps1 finds it through vswhere on
+      # its own; this step puts the full MSVC environment on PATH as well, and
+      # sits after the tests because it also sets Platform=x64 for later steps.
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Publish (Native AOT)
+        run: ./camera/windows-dotnet/build.ps1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+            .python-version
+
+      - name: Install Python dependencies
+        run: uv sync --locked --no-group desktop
+
+      # Same suite the python job runs against the Python mock; the env var adds
+      # the C# exe (started with --backend fake) and the C#-only behaviour tests.
+      - name: Conformance tests against the published exe
+        env:
+          PUSHNAV_CONFORMANCE_SERVER: ${{ github.workspace }}\camera\windows-dotnet\publish\camera_server_dotnet.exe
+        run: uv run --no-sync pytest tests/test_camera_conformance.py -q
+
+      - name: Upload camera_server_dotnet.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: camera_server_dotnet-windows-x64
+          path: camera/windows-dotnet/publish/camera_server_dotnet.exe
+          if-no-files-found: error
+          retention-days: 7
