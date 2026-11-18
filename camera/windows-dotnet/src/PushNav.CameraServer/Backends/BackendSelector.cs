@@ -54,6 +54,11 @@ internal static class BackendSelector
         CancellationToken cancellation = default)
     {
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(step, TimeSpan.Zero);
+        if (backends.Count == 0)
+        {
+            return null; // nothing that could ever find a device: do not wait
+        }
+
         int passes = 1 + (int)(wait.Ticks / step.Ticks);
         for (int pass = 0; pass < passes; pass++)
         {

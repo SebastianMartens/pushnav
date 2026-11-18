@@ -115,7 +115,7 @@ public class BackendSelectorTests
     [Fact]
     public void NoBackendsMeansNoDevice()
     {
-        Assert.Null(BackendSelector.Select([], Wait, Step, _ => { }));
+        Assert.Null(BackendSelector.Select([], Wait, Step, _ => Assert.Fail("no backends: must not wait")));
     }
 
     [Fact]
