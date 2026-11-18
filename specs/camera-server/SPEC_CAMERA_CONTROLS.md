@@ -1,13 +1,14 @@
 # SPEC_CAMERA_CONTROLS.md — PushNav
 
-Version: 1.2 (2026-11-18: C server stays v1 side by side, upstream minimal-diff rules; 1.1: 25 mm reference lens, wide-field solver database)
-Status: Draft — awaiting approval, not yet implemented
+Version: 1.3 (2026-11-18: checked against `main` d665e17 after PRs #9, #10, #14; camera key from HELLO in every session; FOV API; slice plan in §10.8. 1.2: C server stays v1 side by side, upstream minimal-diff rules; 1.1: 25 mm reference lens, wide-field solver database)
+Status: Approved (PR #8), not yet implemented
 Date: 2026-11-18
 Target: all platforms (engine, config, web UI); camera side on the Windows C# server first
 Issue: SebastianMartens/pushnav#3 (camera controls: exposure time, fps, gain, binning)
-Depends on: `specs/start/SPEC_PROTOCOL_CAMERA.md` §11 (protocol v2) and,
-for a real camera with all four controls, `SPEC_CAMERA_SERVER_WINDOWS.md`
-(#1, IDS backend)
+Depends on: `specs/start/SPEC_PROTOCOL_CAMERA.md` §11 (protocol v2) and
+`SPEC_CAMERA_SERVER_WINDOWS.md` (#1). The C# server with the IDS backend
+is merged and speaks v1 (PRs #9, #10, #14); its v2 part is that spec's
+task 7, scheduled in the slices of §10.8.
 Baseline: `specs/start/SPEC_ARCHITECTURE.md` v2.0 (§5, §7, §8, §13)
 
 ---
@@ -31,7 +32,7 @@ Python engine, the config file, the web server and the React UI, and how a
 |---|---|
 | **Control** | A camera setting with an id (`exposure`, `gain`, `fps`, `binning`), a type and a range, as sent in CONTROL_INFO. |
 | **Session version** | The protocol version negotiated for the current camera connection (1 or 2). |
-| **Camera key** | Stable id of a camera model from HELLO (`camera_key`, e.g. `ids:1409:3060`). For v1 servers the engine builds `"<backend>:<camera_model>"`. |
+| **Camera key** | Stable id of a camera model from HELLO (`camera_key`, e.g. `ids:1409:3060`). The server HELLO is sent before negotiation, so the C# server includes it in v1 sessions too. For servers that don't send it (Swift, Linux C, Windows C) the engine builds `"<backend>:<camera_model>"`. |
 | **Camera profile** | The per-camera-key block in config: saved control values and the FOV. |
 | **Stream geometry** | Width, height, binning and generation of the frames currently arriving (from STREAM_INFO, or from HELLO / the decoded frame in v1). |
 | **Generation** | Counter from STREAM_INFO that increases on every stream reconfiguration. |
@@ -61,7 +62,12 @@ server speaks v2.
 | `python/evf/config/profiles.py` | camera-profile helpers on top of `ConfigManager` (§4) |
 | `python/evf/solver/databases.py` | solver-database registry, selection and swapping (§5.4.3) |
 | `python/evf/solver/fov.py` | FOV resolution, learning and FOV search (§5.2, §5.4.4) |
-| `tests/test_camera_v2.py`, `tests/test_profiles.py`, `tests/test_solver_databases.py`, `tests/test_camera_conformance.py` | new tests; existing test files get only updated expectations |
+| `tests/test_camera_v2.py`, `tests/test_profiles.py`, `tests/test_solver_databases.py` | new tests; existing test files get only updated expectations |
+
+`tests/test_camera_conformance.py` already exists (fork file from #1, v1
+vectors, also runs against the C# exe); this work adds the v2 vectors to
+it. `camera/windows-dotnet/**` is fork-owned too, so the C# v2 work
+(`SPEC_CAMERA_SERVER_WINDOWS.md` task 7) needs no hook markers.
 
 **Upstream files touched** (small hooks, each marked
 `# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)`):
@@ -74,7 +80,7 @@ server speaks v2.
 | `python/evf/engine/engine.py` | `startup_camera()` / `set_control()` delegate to `controls.py` / `profiles.py`; owns `SolverParams` | restore, persistence |
 | `python/evf/solver/solver.py` | `solve_frame()` takes FOV + max error; database loaded via `databases.py` | per-profile FOV |
 | `python/evf/solver/thread.py` | reads `SolverParams`; drops mismatched-size results; feeds FOV learning | frame-size change |
-| `python/evf/webserver/server.py` | geometry/FOV from the engine instead of `_FOV_H`/`_IMG_W`/`_IMG_H`; float/enum in `/api/control` | dynamic geometry |
+| `python/evf/webserver/server.py` | geometry/FOV from the engine instead of `_FOV_H`/`_IMG_W`/`_IMG_H`; float/enum in `/api/control`; route for `/api/camera/fov` (§6.1) | dynamic geometry |
 | `python/evf/config/manager.py` | new default keys only | config |
 | `python/evf/paths.py` | `solver_db_dir()` | databases |
 | `tests/mock_camera_server.py` | opt-in `v2=True` mode; v1 default behaviour unchanged | tests |
@@ -87,6 +93,11 @@ server speaks v2.
 Merge-risk notes: `engine.py`, `client.py`, `webserver/server.py` and
 `CameraControls.tsx` are the likeliest conflict points. Keep hooks at the
 edges of functions and push logic into the new modules.
+`subprocess_mgr.py`, `config/manager.py`, `paths.py` and
+`build_windows.bat` already carry `# fork: camera-server-dotnet` hooks
+from #1 (`server_select`, the code-3 fallback, `windows_server`,
+`windows_camera_server_paths()`, Phase 0/1a). Put the new hooks next to
+them, not inside them.
 
 ---
 
@@ -99,8 +110,21 @@ edges of functions and push logic into the new modules.
   `camera.exposure` / `camera.gain` keys, seeding the range midpoint on
   first run (`engine.py` `startup_camera()`); `SubprocessManager` repeats
   the same restore after recovery.
-- Units differ per server: `"100us"` (Linux/macOS), `"log2s"` (Windows C).
-  A saved value from one server is meaningless on another.
+- Units differ per server: `"100us"` (Linux/macOS, and the C# server's
+  v1 view), `"log2s"` (Windows C). A saved value from one server is
+  meaningless on another.
+- Windows: the C# server (`camera_server_dotnet.exe`) is the default and
+  falls back to the C server on exit code 3 (`evf/camera/server_select.py`,
+  `SubprocessManager` hooks). It speaks v1 only: HELLO has
+  `protocol_version: 1`, the real stream size (1936x1216 for the IDS
+  camera), and no `max_protocol_version`, `camera_key` or `capabilities`.
+  Its v1 view (`V1ControlAdapter`) advertises only `exposure` (`"100us"`,
+  capped at 1.5 s because of the 2.0 s stall timeout) and `gain` (0–100);
+  `fps` exists in the backend but is hidden. The IDS backend caps exposure
+  at 4 s itself (`IdsBackend.MaxExposureUs`) and has no binning yet. The
+  Fake backend (`--backend fake`) already simulates binning.
+- With the IDS camera the web server's fixed 1280x720 / 8.86° geometry
+  is wrong today: frames are 1936x1216 and the field is 25.6°.
 - `POST /api/control` casts `value` to `int` (`webserver/server.py`).
 - Geometry constants: `webserver/server.py` hardcodes `_FOV_H = 8.86`,
   `_IMG_W = 1280`, `_IMG_H = 720` (used for the sync origin and the
@@ -193,6 +217,9 @@ keys are **added** and picked up by `_merge_defaults`:
 
 - `windows_server` (`"dotnet"` default, or `"c"`) and `dotnet_uvc` are defined in
   `SPEC_CAMERA_SERVER_WINDOWS.md` §6 and §8.1. Windows only; ignored elsewhere.
+  `windows_server` is in `DEFAULT_CONFIG` already (#1); `dotnet_uvc` is
+  added only with the optional UVC backend (that spec's task 8), not by
+  this work.
 - `max_exposure_us`: UI/engine cap for the exposure slider (default 4 s,
   §9 Q2). The engine clamps the advertised `max` to it before sending
   controls to the UI.
@@ -202,8 +229,11 @@ keys are **added** and picked up by `_merge_defaults`:
 
 ### 4.2 Rules
 
-- Profile key = `client.camera_key` (v2) or `"<backend>:<camera_model>"`
-  (v1). Profiles are created on first connect.
+- Profile key = HELLO `camera_key` when present, in v1 and v2 sessions
+  alike, else `"<backend>:<camera_model>"`. The C# server sends
+  `camera_key` from slice S1 on (§10.8), before it speaks v2, so the IDS
+  profile keeps the key `ids:1409:3060` when the session moves to v2.
+  Profiles are created on first connect.
 - Saving: every successful `set_control` from the UI writes
   `profiles[key].controls[id] = {value, unit}` (unit copied from the
   descriptor). The legacy `camera.exposure` / `camera.gain` are still
@@ -446,7 +476,8 @@ For the IDS reference setup the user can skip the search by entering
 
 ### 5.5 FOV and pixel assumptions elsewhere (audit)
 
-Code that assumes the ~8.86° field or 1280x720, as of `main` 2271bc4:
+Code that assumes the ~8.86° field or 1280x720, as of `main` 2271bc4
+(line numbers re-checked on d665e17, unchanged):
 
 | Location | Assumption | Change |
 |---|---|---|
@@ -485,13 +516,19 @@ state fields.
   The engine validates against the current descriptor: unknown id ->
   HTTP 400; `enum` value not in `options` -> HTTP 400; numbers are passed
   through (the camera clamps). Response unchanged.
+- `POST /api/camera/fov` sets the connected camera's profile FOV (§6.3):
+  `{"focal_length_mm": 25}` (converted with the sensor size, §5.2 step 2;
+  HTTP 400 when the sensor size is unknown), `{"fov_h_deg": 25.6}`
+  (direct), or `{"reset": true}` (clears a user value; learning or search
+  takes over). Sets `fov_source = "user"` and may swap the database
+  (§5.4.3). HTTP 409 when no camera is connected.
 - `/ws` state additions:
   - `controls`: the v2 descriptors as received (with the engine's
     `max_exposure_us` cap applied); v1 descriptors unchanged.
   - `camera.stream`: `{width, height, binning, state, frame_interval_us}`
     or `null`.
   - `camera.protocol_version`, `camera.camera_key`, `camera.backend`.
-  - `fov_h_deg`, `fov_source`.
+  - `fov_h_deg`, `fov_source`, `solver_db`, `fov_out_of_range` (§5.6).
 
 ### 6.2 `CameraControls.tsx`
 
@@ -587,7 +624,10 @@ Under Camera, add:
 
 Resolved: the IDS camera uses a **25 mm Basler lens** (answered by
 Sebastian on #3). This is the reference configuration in §5.2.1 and the
-reason for the wide database in §5.4.
+reason for the wide database in §5.4. Q2–Q5 are decided (below). Q6–Q9
+are measurements on hardware, scheduled in the slices (§10.8). Q10–Q12
+(added 2026-11-18 with the slice plan) need Sebastian; each has a
+proposed answer that the slices assume until he says otherwise.
 
 | # | Question | Needs | Blocks approval? |
 |---|---|---|---|
@@ -595,25 +635,32 @@ reason for the wide database in §5.4.
 | Q3 | ~~Gain shown as `raw` 0–100 for IDS, OK? (protocol §11.9)~~ **Resolved 2026-11-18: yes, a plain 0–100 number (effectively %).** | Sebastian | — |
 | Q4 | ~~Calibration per camera: proposed "ignore calibration from another camera" (§4.2) instead of storing calibration per profile. OK?~~ **Resolved 2026-11-18: as proposed.** | Sebastian | — |
 | Q5 | ~~Should a binning change be blocked while TRACKING, or allowed (pointing survives, overlays rescale)? Proposed: allowed.~~ **Resolved 2026-11-18: allowed, as proposed.** | Sebastian | — |
-| Q6 | **[HW]** Centroid parameters at ~48"/px (1x1) and ~97"/px (2x2) on IMX174 frames: do `sigma_threshold`, `max_pixels`, `matched_filter_sigma` need re-tuning (possibly per database)? | Sebastian + camera + sky | No |
-| Q7 | **[HW]** Wide database: solve rate, solve time and false-positive probability with the proposed 18°–32° / mag 7.0 parameters at 1x1 and 2x2; tune FOV range and magnitude from the results. | Sebastian + camera + sky | No |
-| Q8 | **[HW]** Does tetra3rs's `max_fov_deg` refer to the horizontal FOV (as `fov_estimate` does) or the pattern diameter? The IDS setup has a ~30° diagonal at the top of the proposed range. If solves fail near the corners, raise `max_fov_deg`. | camera + sky | No |
-| Q9 | Memory with one database loaded vs two (FOV search) on the Pi 3A+ (512 MB). | Pi | No |
+| Q6 | **[HW]** Centroid parameters at ~48"/px (1x1) and ~97"/px (2x2) on IMX174 frames: do `sigma_threshold`, `max_pixels`, `matched_filter_sigma` need re-tuning (possibly per database)? Measurement, not a decision: night test after slice S1 (1x1) and S5 (2x2). | Sebastian + camera + sky | No |
+| Q7 | **[HW]** Wide database: solve rate, solve time and false-positive probability with the proposed 18°–32° / mag 7.0 parameters at 1x1 and 2x2; tune FOV range and magnitude from the results. Measurement: same night tests as Q6. | Sebastian + camera + sky | No |
+| Q8 | **[HW]** Does tetra3rs's `max_fov_deg` refer to the horizontal FOV (as `fov_estimate` does) or the pattern diameter? The IDS setup has a ~30° diagonal at the top of the proposed range. If solves fail near the corners, raise `max_fov_deg`. Measurement: S1 night test. | camera + sky | No |
+| Q9 | Memory with one database loaded vs two (FOV search) on the Pi 3A+ (512 MB). Needs a Pi 3A+ (see Q11). | Pi | No |
+| Q10 | Interim FOV entry in slice S1: S1 lets the engine use a per-camera FOV and the wide database, but the Settings field and `/api/camera/fov` come in S2. Is setting `camera.profiles["ids:1409:3060"].fov_h_deg = 25.6` by hand in `config.json` (with `fov_source: "user"`) acceptable for a night test between S1 and S2? **Proposed: yes**; otherwise S1 grows by the API + one Settings field. | Sebastian | No (affects S1 size only) |
+| Q11 | Is an OV9281 module (and a Pi 3A+) available for the **[HW: OV9281]** checks (tasks 1.7, 6.5; Windows Q10) and the Pi memory check (Q9, task 4.11)? **Proposed:** if not, the v1 path is covered by pytest against the mock in v1 mode and by the C server staying unmodified; the hardware checks become optional and the Pi check uses laptop numbers plus the one-database-at-a-time rule. | Sebastian | No |
+| Q12 | Long-exposure mode in **v2** sessions (`SPEC_CAMERA_SERVER_WINDOWS.md` §5.6): the IDS backend never leaves it today because switching off gaps the stream ~2.5 s, more than the v1 stall timeout; in long mode `fps` is fixed. **Proposed:** in v2 sessions, leave long mode when the exposure drops back into the normal range, wrapped in STREAM_INFO `reconfiguring` → `streaming` (the engine pauses stall detection for up to 5 s, §3.3), so `fps` becomes settable again. v1 sessions keep the sticky behaviour. | Sebastian | No (S5 only) |
 
 ---
 
 ## 10. Implementation Tasks
 
 Dependency: tasks 1–5 can be built and tested against the Python mock
-(v2 mode) without #1. Tasks marked **[HW]** need Sebastian + the IDS
-camera (25 mm lens) with the C# server from #1 (its task 7).
+(v2 mode). The C# server from #1 is merged and speaks v1 with the IDS
+backend, so the FOV and database work (task 4) can be tested on the IDS
+camera before any v2 code exists. Tasks marked **[HW]** need Sebastian +
+the IDS camera (25 mm lens); those that need all four controls also need
+`SPEC_CAMERA_SERVER_WINDOWS.md` task 7 (v2 in the C# server). The order
+of work is the slice plan in §10.8.
 
 ### 1. Protocol plumbing (Python)
 - [ ] 1.1 `protocol.py`: new message ids and names. Test: pytest `type_name`.
 - [ ] 1.2 `client.py`: v1/v2 negotiation, `session_version`, `camera_key`, `capabilities`. Test: pytest against mock v1 and v2; existing tests green.
 - [ ] 1.3 `client.py`: STREAM_INFO -> `StreamGeometry`, callback, frame buffer clear on new generation; FRAME_RAW parsed and ignored; float `set_control`. Test: pytest.
 - [ ] 1.4 `mock_camera_server.py` v2 mode (IDS-like controls, coupling, binning, STREAM_INFO). Test: pytest.
-- [ ] 1.5 `tests/test_camera_conformance.py` v2 vectors (shared with #1 task 3.2). Test: green against the mock.
+- [ ] 1.5 `tests/test_camera_conformance.py` v2 vectors (§11.8 1–5; 6 only where GRAY8 is advertised), added to the existing v1 suite from #1 task 3.2. Test: green against the mock; the C# exe joins in S5.
 - [ ] 1.6 `data/VERSION.json` `protocol_version: 2` + update `tests/test_camera.py`/`test_subprocess_mgr.py` expectations. Test: pytest.
 - [ ] 1.7 v1 regression: the v2 engine against the mock in v1 mode behaves exactly like today (two controls, native units, 2.0 s stall). Test: pytest. **[HW: OV9281]** With `camera.windows_server = "c"` (and via the code-3 fallback), the unmodified C server works with the v2 engine.
 
@@ -622,8 +669,8 @@ camera (25 mm lens) with the C# server from #1 (its task 7).
 - [ ] 2.2 `restore_controls()` used by engine startup and recovery. Test: pytest order and unit filtering.
 
 ### 3. Config profiles
-- [ ] 3.1 `DEFAULT_CONFIG` additions (incl. `camera.last_camera_key`), profile helpers in `ConfigManager`, `CONFIG_VERSION` unchanged. Test: pytest load of an old config file keeps all values.
-- [ ] 3.2 First-run defaults and legacy migration. Test: pytest.
+- [ ] 3.1 `DEFAULT_CONFIG` additions (incl. `camera.last_camera_key`, `camera.max_exposure_us`, `camera.profiles`), profile helpers in `evf/config/profiles.py`, profile key from HELLO `camera_key` else `"<backend>:<camera_model>"` (§4.2), `CONFIG_VERSION` unchanged. Test: pytest load of an old config file keeps all values; key from a HELLO with and without `camera_key`.
+- [ ] 3.2 Saving every successful `set_control` into the profile with its unit, first-run defaults and legacy migration (§4.2). Test: pytest.
 - [ ] 3.3 `calibration.camera_key` and `has_calibration` check. Test: pytest.
 
 ### 4. Geometry, FOV and solver databases
@@ -635,7 +682,7 @@ camera (25 mm lens) with the C# server from #1 (its task 7).
 - [ ] 4.6 FOV search for profiles without a FOV (§5.4.4) + UI state. Test: pytest with a fake solver that only solves on one database.
 - [ ] 4.7 Ship the wide DB: `build_mac.sh`, `build_linux.sh`, `build_windows.bat`, `build_headless_deb.sh` copy it; `scripts/smoke_test_headless_deb.sh` checks it exists. Test: local Windows build + headless smoke test show both files.
 - [ ] 4.8 **[INFRA]** `build.yml` "Verify required files" (4 jobs) lists `data/tetra3rs_gaia_wide.bin`. Test: `workflow_dispatch` build green.
-- [ ] 4.9 Web server: dynamic `image_w/h`, `fov_h_deg`, `fov_source`, `solver_db`, `fov_out_of_range`; origin/projection parameters. Test: pytest payload tests at 1280x720 / 8.86° and 968x608 / 25.6°.
+- [ ] 4.9 Web server: dynamic `image_w/h` (v1: HELLO size corrected by the first decoded frame, §5.1), `fov_h_deg`, `fov_source`, `solver_db`, `fov_out_of_range`; origin/projection parameters. Test: pytest payload tests at 1280x720 / 8.86°, 1936x1216 / 25.6° and 968x608 / 25.6°.
 - [ ] 4.10 Overlay marker scaling by `image_w / 1280` (NavOverlay, SyncCandidatesOverlay, StarOverlay) and a 1936x1216 / 25.6° Wizard test fixture. Test: vitest.
 - [ ] 4.11 Measure RSS with the narrow DB, the wide DB, and both, on the dev laptop and the Pi 3A+ (Q9). Test: numbers in the PR.
 
@@ -644,6 +691,7 @@ camera (25 mm lens) with the C# server from #1 (its task 7).
 - [ ] 5.2 `types.ts` + `CameraControls.tsx` int/float/enum, log slider, unit labels, reconfiguring state. Test: vitest.
 - [ ] 5.3 Settings: camera info, FOV + source + active database, focal-length field, out-of-range hint. Test: vitest + manual against the mock.
 - [ ] 5.4 Manual UI check on desktop window and phone (LAN) against the mock in v2 mode. Test: screenshots in the PR.
+- [ ] 5.5 `POST /api/camera/fov` (focal length, direct FOV, reset; §6.1). Test: pytest API tests (unknown sensor size -> 400, no camera -> 409, database swap on a range change).
 
 ### 6. Hardware verification (IDS UI-306xCP-M + 25 mm Basler lens)
 - [ ] 6.1 **[HW]** IDS v2 session: all four controls appear with real ranges; exposure > frame interval lowers fps; CONTROL_INFO ranges update in the UI.
@@ -654,4 +702,75 @@ camera (25 mm lens) with the C# server from #1 (its task 7).
 - [ ] 6.6 **[HW]** 4 s exposure: no stall-restart loop.
 
 ### 7. Docs
-- [ ] 7.1 `SPEC_ARCHITECTURE.md` §5/§7/§8 (stream geometry, stall timeout, per-profile FOV replacing the fixed §8.1 optics, both databases), §13 config keys, `SPEC_BUILD_RELEASE.md` (both DB files), `CLAUDE.md` catalog section, and `docs/` user notes on camera controls and lens/FOV, when this lands. Test: review.
+- [ ] 7.1 FOV and databases: `SPEC_ARCHITECTURE.md` §8 (per-profile FOV replacing the fixed §8.1 optics, both databases), §13 config keys (`profiles`, `last_camera_key`, `max_exposure_us`), `SPEC_BUILD_RELEASE.md` (both DB files), `CLAUDE.md` catalog section, `docs/` user note on lens/FOV. Test: review.
+- [ ] 7.2 Camera controls: `SPEC_ARCHITECTURE.md` §5/§7 (stream geometry, stall timeout), `docs/` user note on camera controls, `SPEC_PROTOCOL_CAMERA.md` §11 status "implemented". Test: review.
+
+### 8. Slices (order of work)
+
+Six PRs, merged in this order. Each one leaves `uv run pytest tests/`,
+vitest and (where touched) the C# xUnit tests green and the app working
+with every camera server. `W7.x` / `W6.x` are tasks in
+`SPEC_CAMERA_SERVER_WINDOWS.md` §12. Minimal-diff rules (§1.2) apply to
+every slice: new logic in the new modules, `# fork: camera-controls`
+hooks in upstream files, `camera/windows/` untouched (check with
+`git diff upstream/main -- camera/windows/` before each PR).
+
+The wide-field database comes first: it is what stops the IDS camera with
+the 25 mm lens from solving, and it works over today's v1 session.
+
+| Slice | Tasks | Needs | Size |
+|---|---|---|---|
+| S1 Wide-field solving | 3.1, 4.1, 4.4, 4.5, 4.7, 4.9, 7.1, W7.0; **[INFRA]** 4.8 | — | L |
+| S2 FOV in the UI, learning, search | 3.3, 4.3, 4.6, 4.10, 4.11, 5.3, 5.5 | S1 | M |
+| S3 Protocol v2 in the engine (mock) | 1.1–1.7, 2.1, 2.2, 3.2, 4.2 | S1 (config profiles) | M |
+| S4 Controls API and UI | 5.1, 5.2, 5.4 | S3 | M |
+| S5 C# server v2 session | W7.1; **[INFRA]** W6.5 | S4 | M |
+| S6 IDS binning | W7.2, 7.2 | S5 | M |
+
+**S1 Wide-field solving (v1 sessions).**
+- Build and commit `data/tetra3rs_gaia_wide.bin` and `data/solver_dbs.json`; parameterised build script; `VERSION.json` `solver_db_version_wide`; both files shipped by all four build scripts and checked by the headless smoke test.
+- Database registry with one database loaded at a time (`solver/databases.py`, `paths.solver_db_dir()`); `solve_frame(fov, err)` with `SolverParams`.
+- Minimal profiles (`config/profiles.py`): the key rule, `fov_h_deg`, `fov_source`, `last_camera_key`. FOV resolution implements §5.2 steps 1 and 4 only: the profile value, else 8.86° with the narrow database (today's behaviour).
+- Web server geometry from the engine, so the IDS frame size (1936x1216) and FOV reach the projection and the UI.
+- C# HELLO gains `camera_key` and `capabilities.sensor` (W7.0).
+- Files: `scripts/build_tetra3rs_catalog.py`, `scripts/bench_solvers.py`, `data/*`, `python/evf/{paths.py, solver/solver.py, solver/thread.py, solver/databases.py, config/manager.py, config/profiles.py, engine/engine.py, webserver/server.py}`, `scripts/build_{mac,linux,headless_deb}.sh`, `scripts/build_windows.bat`, `scripts/smoke_test_headless_deb.sh`, `camera/windows-dotnet/src/.../Protocol/Messages.cs`, `Server/ClientSession.cs`, `CLAUDE.md`, `specs/start/SPEC_ARCHITECTURE.md`, `SPEC_BUILD_RELEASE.md`.
+- Infra: `build.yml` verify lists (4.8). W6.6 (setup-dotnet in `build-windows`) edits the same job and can go in the same infra pass.
+- Test: `tests/test_solver_offline.py` unchanged at 8.86° / 1.5°; new `test_solver_databases.py` (selection inside / overlap / out of range, swap on the solver thread), `test_profiles.py` (old config loads unchanged, key with and without `camera_key`), `test_paths_headless.py` (`solver_db_dir()`), payload tests at 1280x720, 1936x1216 and 968x608; xUnit on the HELLO JSON; conformance v1 suite green against the mock and the exe; local Windows build contains both database files.
+- **[HW]** Night test with the IDS camera at 1x1: W5.9 and task 6.3 at 1x1 (Q6–Q8), with the FOV entered by hand in `config.json` (Q10). Exposure is limited to the v1 cap of 1.5 s, which is enough for a 25 mm lens. Save a few frames as wide-field `tests/samples` fixtures.
+- Possible split if the PR gets too big: S1a = database build, shipping and registry (narrow stays selected, no behaviour change); S1b = profiles, FOV and geometry.
+
+**S2 FOV in the UI, learning and search.**
+- FOV learning and FOV search (`solver/fov.py`), `POST /api/camera/fov`, Settings fields (camera, FOV + source + database, focal length, reset, out-of-range hint), calibration tied to `calibration.camera_key`, overlay marker scaling, RSS numbers.
+- Files: `python/evf/{solver/fov.py, solver/thread.py, engine/engine.py, webserver/server.py, config/profiles.py}`, `web/src/lib/types.ts`, `web/src/components/settings/Settings.tsx`, `web/src/components/live-view/{NavOverlay,SyncCandidatesOverlay,StarOverlay}.tsx`, `web/src/components/wizard/Wizard.test.tsx`.
+- Test: pytest for learning (outliers, range guard, 10 % step), search (fake solver that solves on one database only), the FOV API, `has_calibration` across camera keys; the wide-field fixture from S1 solves with the wide database and not with the narrow one; vitest for the Settings fields, marker scaling and the 1936x1216 / 25.6° Wizard fixture.
+- **[HW]** Task 6.4 (fresh profile finds ~25.6° by search; with 25 mm entered no search). Task 4.11 on the laptop; on the Pi only if available (Q11).
+
+**S3 Protocol v2 in the engine, against the mock.**
+- Negotiation, STREAM_INFO / FRAME_RAW parsing, float `set_control`, liveness, one restore path, per-profile control values with units, dropping results of the wrong size, mock v2 mode, conformance v2 vectors, `VERSION.json` `protocol_version: 2`.
+- No real server offers v2 yet, so every real session stays v1 and behaves exactly as before.
+- Files: `python/evf/camera/{protocol.py, client.py, stream.py, controls.py, subprocess_mgr.py}`, `python/evf/{engine/engine.py, solver/thread.py, config/profiles.py}`, `tests/mock_camera_server.py`, `tests/test_camera_v2.py`, `tests/test_camera_conformance.py`, expectation updates in `tests/test_camera.py` / `test_subprocess_mgr.py`, `data/VERSION.json`.
+- Test: pytest (v1 and v2 mock modes, 4 s frames without a restart, restore order and unit filter, first-run defaults, legacy migration).
+- **[HW: OV9281]** Task 1.7 is optional (Q11).
+
+**S4 Controls API and UI.**
+- `/api/control` with numbers and validation, `/ws` control and stream fields, `CameraControls.tsx` for int/float/enum, log sliders, unit labels, and the reconfiguring state.
+- Must merge before S5: until then the UI never sees v2 descriptors from a real camera.
+- Files: `python/evf/{webserver/server.py, engine/engine.py, camera/controls.py}`, `web/src/lib/types.ts`, `web/src/components/controls/CameraControls.tsx`.
+- Test: pytest API tests; vitest (widgets, log mapping, all units incl. v1 `"100us"` / `"log2s"`); task 5.4 screenshots against the mock in v2 mode. No hardware.
+
+**S5 C# server v2 session.**
+- W7.1: handshake, native descriptors without the 1.5 s cap, STREAM_INFO, binning on the Fake backend.
+- After this merge the IDS camera runs v2 with exposure (up to 4 s), fps and gain; binning is not offered yet.
+- Infra: W6.5 adds the `camera-server-windows` CI job, so the v2 conformance run against the exe gates this PR. Route it to infra first, or with this slice.
+- Files: `camera/windows-dotnet/**` (Protocol, Server, Controls, Fake backend, tests), `.github/workflows/test.yml` (infra).
+- Test: xUnit; conformance v1 + v2 vectors against the mock and the exe (`--backend fake`).
+- **[HW]** Tasks 6.1, 6.5 and 6.6, plus the conformance suite with `PUSHNAV_CONFORMANCE_BACKEND=ids`.
+
+**S6 IDS binning.**
+- W7.2: `is_SetBinning` with the in-process restart, STREAM_INFO, and long-exposure handling in v2 (Q12).
+- Docs task 7.2.
+- Files: `camera/windows-dotnet/src/.../Backends/Ids/*`, the IDS xUnit tests, `specs/start/SPEC_ARCHITECTURE.md`, `docs/`.
+- Test: xUnit with `FakeUEyeApi`.
+- **[HW]** Tasks 6.2 and 6.3 at 2x2 (Q6, Q7 at ~97"/px), and W7.2 binning 968x608 in the app. Closes #3 together with the docs.
+
+Hardware summary: S1 (night, 1x1), S2 (FOV search), S5 (controls, 4 s), S6 (binning, night at 2x2) need Sebastian and the IDS camera; S3 and S4 need none.
