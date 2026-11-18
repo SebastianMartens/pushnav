@@ -191,6 +191,23 @@ camera\windows\build.bat
 # Compiles C/DirectShow camera server
 ```
 
+Fork addition: a second Windows camera server, the C# / .NET 10 Native AOT
+`camera_server_dotnet.exe`, lives next to it for good (the C server is not
+modified). It is the default and the only one that drives IDS uEye cameras:
+
+```bash
+camera\windows-dotnet\build.bat
+# dotnet publish (Native AOT) -> camera\windows-dotnet\publish\camera_server_dotnet.exe
+```
+
+Needs the .NET 10 SDK (pinned in `camera/windows-dotnet/global.json`) and the MSVC
+linker. At runtime `camera.windows_server` (`"dotnet"` default, or `"c"`) and the
+`PUSHNAV_CAMERA_SERVER` environment variable pick the server
+(`evf/camera/server_select.py`); a C# server that finds no supported camera exits with
+code 3 and the engine starts the C server instead. Both exes are meant to ship in the
+release directory; adding the C# build to `scripts/build_windows.bat` is task 6.3 of
+`specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md` (sections 8 and 10).
+
 ### 6.2 Python app + installer
 
 ```bash

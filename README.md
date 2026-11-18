@@ -380,3 +380,19 @@ The Pi label script `scripts/make_pi_label.py` uses the
 font, kept in `scripts/fonts/` with its SIL Open Font License
 (`scripts/fonts/OFL.txt`).
 
+## Third-party software
+
+**IDS Software Suite (optional, for IDS uEye cameras on Windows).** The IDS
+camera drivers and the uEye API runtime (`ueye_api_64.dll`) are proprietary
+software of IDS Imaging Development Systems and are **not part of PushNav**.
+You install the IDS Software Suite yourself, from IDS. PushNav does not include,
+bundle or redistribute any IDS file (no DLLs, no headers, no installer), and the
+installer for PushNav contains none.
+
+The C# camera server (`camera_server_dotnet.exe`) only loads `ueye_api_64.dll` at
+run time, when it is present on the machine. Without it the IDS backend is simply
+unavailable and the app works with the other supported cameras as before. The API
+declarations the server uses are written for PushNav and licensed like the rest of
+the code (GPL-3.0-or-later). See [docs/hardware.md](docs/hardware.md#ids-ueye-cameras-windows-optional)
+for what is supported and how to set it up.
+

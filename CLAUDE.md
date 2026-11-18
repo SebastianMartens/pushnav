@@ -47,7 +47,15 @@ make -C camera/linux                # Linux — C/V4L2 camera server
 
 ```cmd
 camera\windows\build.bat            :: Windows — C/DirectShow camera server (run from VS Developer Command Prompt)
+camera\windows-dotnet\build.bat     :: Windows — C#/.NET 10 Native AOT camera server (default; IDS cameras). Needs the .NET 10 SDK + MSVC linker
 ```
+
+On Windows the engine starts the C# server by default, and the C server when the C# one
+finds no supported camera (exit code 3) or when `camera.windows_server` / the
+`PUSHNAV_CAMERA_SERVER` environment variable says `"c"` (`evf/camera/server_select.py`; spec
+`specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md`). IDS cameras need the IDS Software
+Suite installed separately; PushNav never bundles it. Dev only: `PUSHNAV_CAMERA_SERVER_ARGS`
+passes extra arguments to the C# server, e.g. `--backend fake --fake-images tests/samples`.
 
 ### Platform-specific app builds
 
@@ -145,6 +153,7 @@ camera/
   mac/                          # Swift camera server (macOS)
   linux/                        # C/V4L2 camera server (Linux)
   windows/                      # C/DirectShow camera server (Windows)
+  windows-dotnet/               # C#/.NET 10 Native AOT camera server (Windows, default; IDS cameras)
 data/
   tetra3rs_gaia.bin             # tetra3rs Gaia star catalog (~50 MB)
   VERSION.json                  # app + protocol + db version metadata
