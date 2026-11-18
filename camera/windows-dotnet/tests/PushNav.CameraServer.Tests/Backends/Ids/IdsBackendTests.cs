@@ -1,0 +1,666 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// This file is part of PushNav (camera server, C# / .NET).
+
+using PushNav.CameraServer.Backends;
+using PushNav.CameraServer.Backends.Ids;
+using PushNav.CameraServer.Controls;
+using PushNav.CameraServer.Imaging;
+
+namespace PushNav.CameraServer.Tests.Backends.Ids;
+
+public class IdsBackendTests : IDisposable
+{
+    private readonly FakeUEyeApi _api = new();
+    private readonly List<IdsBackend> _backends = [];
+
+    public void Dispose()
+    {
+        foreach (var backend in _backends)
+        {
+            backend.Dispose();
+        }
+
+        _api.Dispose();
+    }
+
+    private IdsBackend CreateBackend(bool open = true)
+    {
+        var backend = new IdsBackend(_api, 90, new Logger(TextWriter.Null, LogLevel.Debug)) { MinimumFrameTimeoutMilliseconds = 20 };
+        _backends.Add(backend);
+        if (open)
+        {
+            backend.Open(backend.Probe()[0]);
+        }
+
+        return backend;
+    }
+
+    private static ControlDescriptor Control(IdsBackend backend, string id) => backend.Controls.Single(c => c.Id == id);
+
+    private sealed class CollectingSink : IFrameSink
+    {
+        private readonly object _gate = new();
+        private readonly List<(byte[] Data, FrameKind Kind, StreamGeometry Geometry)> _frames = [];
+
+        public int Count
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _frames.Count;
+                }
+            }
+        }
+
+        public (byte[] Data, FrameKind Kind, StreamGeometry Geometry) First()
+        {
+            lock (_gate)
+            {
+                return _frames[0];
+            }
+        }
+
+        public void OnFrame(ReadOnlySpan<byte> data, FrameKind kind, StreamGeometry geometry)
+        {
+            lock (_gate)
+            {
+                _frames.Add((data.ToArray(), kind, geometry));
+            }
+        }
+
+        public bool WaitForFrames(int count, int timeoutMs = 5000)
+        {
+            long deadline = Environment.TickCount64 + timeoutMs;
+            while (Count < count)
+            {
+                if (Environment.TickCount64 > deadline)
+                {
+                    return false;
+                }
+
+                Thread.Sleep(5);
+            }
+
+            return true;
+        }
+    }
+
+    // -- probe -------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void ProbeListsTheCamerasWithTheirStableKey()
+    {
+        var backend = CreateBackend(open: false);
+
+        var device = Assert.Single(backend.Probe());
+
+        Assert.Equal("ids", device.BackendId);
+        Assert.Equal("UI306xCP-M", device.Model);
+        Assert.Equal("4102825084", device.Serial);
+        Assert.Equal("ids:1409:3060", device.CameraKey);
+        Assert.Equal(FakeUEyeApi.DeviceId.ToString(), device.Handle);
+    }
+
+    [Fact]
+    public void ProbeIsEmptyWithoutCameras()
+    {
+        _api.Cameras.Clear();
+
+        Assert.Empty(CreateBackend(open: false).Probe());
+    }
+
+    [Fact]
+    public void ProbeNeverThrowsEvenWhenTheRuntimeMisbehaves()
+    {
+        _api.ThrowOnGetCameraList = true;
+
+        Assert.Empty(CreateBackend(open: false).Probe());
+    }
+
+    [Fact]
+    public void AnUnknownModelIsKeyedByItsNameAndStillWorks()
+    {
+        _api.Cameras[0] = _api.Cameras[0] with { Model = "UI1220LE" };
+        var backend = CreateBackend(open: false);
+
+        var device = Assert.Single(backend.Probe());
+
+        Assert.Equal("ids:UI1220LE", device.CameraKey);
+        backend.Open(device);
+        Assert.Equal(FakeUEyeApi.Width, backend.Geometry.Width);
+    }
+
+    // -- open ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void OpenConfiguresMono8WithAutoFeaturesOffAndFullFrame()
+    {
+        var backend = CreateBackend();
+
+        var calls = _api.Calls;
+        Assert.Contains($"InitCamera {FakeUEyeApi.DeviceId}", calls);
+        Assert.Contains("SetColorModeMono8", calls);
+        Assert.Contains("SetDisplayModeDib", calls);
+        Assert.Contains("DisableBinning", calls);
+        foreach (int parameter in new[] { UEyeConst.SetEnableAutoGain, UEyeConst.SetEnableAutoShutter, UEyeConst.SetEnableAutoFramerate })
+        {
+            Assert.Contains($"SetAutoParameter 0x{parameter:X} 0", calls);
+        }
+
+        Assert.Equal(new StreamGeometry(FakeUEyeApi.Width, FakeUEyeApi.Height, 1, PixelFormat.Gray8), backend.Geometry);
+        Assert.Equal("UI306xCP-M", backend.Device.Model);
+        Assert.Equal("windows-dotnet-ids", backend.HelloName);
+        Assert.Equal(10, backend.DefaultFps);
+    }
+
+    [Fact]
+    public void OpenAllocatesTheBufferRingAndTheImageQueue()
+    {
+        CreateBackend();
+
+        Assert.Equal(IdsBackend.BufferCount, _api.CallCount("AllocImageMemory"));
+        Assert.Equal(IdsBackend.BufferCount, _api.CallCount("AddToSequence"));
+        Assert.Equal(1, _api.CallCount("InitImageQueue"));
+        Assert.Equal(IdsBackend.BufferCount, _api.OpenBuffers);
+    }
+
+    [Fact]
+    public void OpenStartsAtTheLowestPixelClockThatReachesTheDefaultFrameRate()
+    {
+        var backend = CreateBackend();
+
+        Assert.Equal(30u, _api.PixelClockMhz);          // 30 MHz reaches 10.24 fps
+        Assert.Equal(10.0, _api.FrameRate, precision: 3);
+        Assert.Equal(50.0, _api.ExposureMs, precision: 3);
+        Assert.False(_api.LongExposureEnabled);
+        Assert.Equal(0, _api.Gain);
+        Assert.Equal(50_000, Control(backend, ControlIds.Exposure).Cur);
+    }
+
+    [Fact]
+    public void OpenFailureBecauseTheCameraIsBusyNamesTheLikelyCause()
+    {
+        _api.InitStatus = UEyeConst.DeviceInUse;
+        var backend = CreateBackend(open: false);
+
+        var ex = Assert.Throws<CameraException>(() => backend.Open(backend.Probe()[0]));
+
+        Assert.Contains("another program", ex.Message);
+        Assert.Equal(0, _api.CallCount("ExitCamera")); // nothing was opened
+    }
+
+    [Fact]
+    public void AFailureHalfwayThroughOpenReleasesTheCamera()
+    {
+        _api.SensorInfoStatus = UEyeConst.NoSuccess;
+        var backend = CreateBackend(open: false);
+
+        Assert.Throws<CameraException>(() => backend.Open(backend.Probe()[0]));
+
+        Assert.Equal(1, _api.CallCount("ExitCamera"));
+        Assert.False(_api.IsOpen);
+    }
+
+    [Fact]
+    public void OpeningWithoutRemovalEventsStillWorks()
+    {
+        _api.EventInitStatus = UEyeConst.NotSupported;
+
+        var backend = CreateBackend();
+
+        Assert.Equal(FakeUEyeApi.Width, backend.Geometry.Width);
+    }
+
+    [Fact]
+    public void ReopeningClosesTheFirstCamera()
+    {
+        var backend = CreateBackend();
+
+        backend.Open(backend.Probe()[0]);
+
+        Assert.Equal(1, _api.CallCount("ExitCamera"));
+        Assert.Equal(IdsBackend.BufferCount, _api.OpenBuffers);
+    }
+
+    // -- controls -------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void ControlsAreAdvertisedInNativeUnitsWithTheRealRanges()
+    {
+        var backend = CreateBackend();
+
+        var exposure = Control(backend, ControlIds.Exposure);
+        Assert.Equal("us", exposure.Unit);
+        Assert.Equal(92, exposure.Min);               // the 30 MHz minimum, 91.6 us, rounded up
+        Assert.Equal(4_000_000, exposure.Max);        // capped (spec Q5), the sensor itself offers 30 s
+        var gain = Control(backend, ControlIds.Gain);
+        Assert.Equal(0, gain.Min);
+        Assert.Equal(100, gain.Max);
+        var fps = Control(backend, ControlIds.Fps);
+        Assert.Equal(1.0, fps.Min);
+        Assert.InRange(fps.Max, 19.0, 20.0);          // 50 ms exposure + headroom: 1e6 / 51 000 = 19.6
+        Assert.DoesNotContain(backend.Controls, c => c.Id == ControlIds.Binning); // binning is v2 (task 7.2)
+    }
+
+    [Fact]
+    public void ProtocolV1SeesExposureIn100MicrosecondUnitsCappedAt1500Milliseconds()
+    {
+        var backend = CreateBackend();
+
+        var info = V1ControlAdapter.Project(backend.Controls);
+
+        var exposure = info.Controls.Single(c => c.Id == "exposure");
+        Assert.Equal("100us", exposure.Unit);
+        Assert.Equal(1, exposure.Min);
+        Assert.Equal(15_000, exposure.Max);
+        Assert.Equal(500, exposure.Cur);
+        var gain = info.Controls.Single(c => c.Id == "gain");
+        Assert.Equal("raw", gain.Unit);
+        Assert.Equal(0, gain.Min);
+        Assert.Equal(100, gain.Max);
+        Assert.Equal(2, info.Controls.Count);
+    }
+
+    [Fact]
+    public void GainIsAppliedAndReadBack()
+    {
+        var backend = CreateBackend();
+
+        Assert.True(backend.SetControl(ControlIds.Gain, 55).Accepted);
+        Assert.Equal(55, _api.Gain);
+        Assert.Equal(55, Control(backend, ControlIds.Gain).Cur);
+
+        Assert.True(backend.SetControl(ControlIds.Gain, 5000).Accepted); // clamped like the protocol says
+        Assert.Equal(100, _api.Gain);
+        Assert.Equal(100, Control(backend, ControlIds.Gain).Cur);
+    }
+
+    [Fact]
+    public void ARoutineExposureChangeTouchesOnlyTheExposure()
+    {
+        var backend = CreateBackend();
+        _api.ClearCalls();
+
+        Assert.True(backend.SetControl(ControlIds.Exposure, 20_000).Accepted);
+
+        Assert.Equal(new[] { "SetExposure 20" }, _api.Calls); // no pixel clock / frame rate / long mode traffic
+        Assert.Equal(20_000, Control(backend, ControlIds.Exposure).Cur);
+    }
+
+    [Fact]
+    public void ALongerExposureLowersTheFrameRateInsteadOfBeingClamped()
+    {
+        var backend = CreateBackend();
+
+        Assert.True(backend.SetControl(ControlIds.Exposure, 200_000).Accepted);
+
+        Assert.Equal(200.0, _api.ExposureMs, precision: 3);   // not clamped to the ~99 ms a 10 fps frame allows
+        Assert.InRange(_api.FrameRate, 4.9, 5.0);              // 1e6 / 201 000
+        Assert.Equal(30u, _api.PixelClockMhz);                 // a slower frame rate never needs a faster clock
+        Assert.Equal(200_000, Control(backend, ControlIds.Exposure).Cur);
+        Assert.InRange(Control(backend, ControlIds.Fps).Cur, 4.9, 5.0);
+    }
+
+    [Fact]
+    public void ShorteningTheExposureRestoresThePreferredFrameRate()
+    {
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 500_000);
+        Assert.InRange(_api.FrameRate, 1.9, 2.0);
+
+        backend.SetControl(ControlIds.Exposure, 10_000);
+
+        Assert.Equal(10.0, _api.FrameRate, precision: 3);
+        Assert.Equal(10.0, Control(backend, ControlIds.Fps).Cur);
+    }
+
+    [Fact]
+    public void FrameRatesAboveWhatTheLowestClockOffersSwitchThePixelClock()
+    {
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 5_000);
+
+        foreach (var (fps, mhz) in new[] { (20.0, 59u), (40.0, 118u), (41.0, 237u), (10.0, 30u) })
+        {
+            Assert.True(backend.SetControl(ControlIds.Fps, fps).Accepted);
+            Assert.Equal(mhz, _api.PixelClockMhz);
+            Assert.Equal(fps, _api.FrameRate, precision: 3);
+        }
+    }
+
+    [Fact]
+    public void TheFpsControlIsLimitedByTheExposure()
+    {
+        var backend = CreateBackend();
+
+        backend.SetControl(ControlIds.Fps, 100); // at 50 ms exposure at most ~19.6 fps fit
+
+        Assert.InRange(_api.FrameRate, 19.0, 20.0);
+    }
+
+    [Fact]
+    public void AnExposureBeyondTheNormalRangeSwitchesLongExposureModeOn()
+    {
+        var backend = CreateBackend();
+
+        Assert.True(backend.SetControl(ControlIds.Exposure, 1_200_000).Accepted);
+
+        Assert.True(_api.LongExposureEnabled);
+        Assert.Equal(1200.0, _api.ExposureMs, precision: 3);
+        Assert.Equal(1.0, _api.FrameRate, precision: 3);
+        Assert.Equal(1_200_000, Control(backend, ControlIds.Exposure).Cur);
+        Assert.Equal(1.0, Control(backend, ControlIds.Fps).Cur);
+
+        var order = _api.Calls.ToList();
+        Assert.True(order.LastIndexOf("SetFrameRate 1") < order.LastIndexOf("SetLongExposure True")); // timing first, then the mode
+        Assert.True(order.LastIndexOf("SetLongExposure True") < order.LastIndexOf("SetExposure 1200"));
+    }
+
+    [Fact]
+    public void LongExposureModeStaysOnForTheSession()
+    {
+        // Leaving long mode blocks about a second and then delivers no frame for another second (a 2.5 s gap on the real
+        // camera), which makes the v1 engine restart the server: so a shorter exposure is set inside long mode.
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        _api.ClearCalls();
+
+        backend.SetControl(ControlIds.Exposure, 30_000);
+
+        Assert.True(_api.LongExposureEnabled);
+        Assert.DoesNotContain("SetLongExposure False", _api.Calls);
+        Assert.Equal(new[] { "SetExposure 30" }, _api.Calls);
+        Assert.Equal(30.0, _api.ExposureMs, precision: 3);
+        Assert.InRange(Control(backend, ControlIds.Fps).Cur, 10.0, 10.3); // 1 / the 30 MHz clock's 97.6 ms frame time
+    }
+    [Fact]
+    public void ChangingTheExposureInsideLongModeDoesNotToggleTheMode()
+    {
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        _api.ClearCalls();
+
+        backend.SetControl(ControlIds.Exposure, 2_500_000);
+
+        Assert.Equal(new[] { "SetExposure 2500" }, _api.Calls);
+        Assert.Equal(2_500_000, Control(backend, ControlIds.Exposure).Cur);
+    }
+
+    [Fact]
+    public void ExposureIsClampedToTheAdvertisedMaximum()
+    {
+        var backend = CreateBackend();
+
+        backend.SetControl(ControlIds.Exposure, 25_000_000);
+
+        Assert.Equal(4000.0, _api.ExposureMs, precision: 3);
+    }
+
+    [Fact]
+    public void WithoutLongExposureSupportTheNormalMaximumIsTheLimit()
+    {
+        _api.LongExposureSupported = false;
+        var backend = CreateBackend();
+
+        var exposure = Control(backend, ControlIds.Exposure);
+        backend.SetControl(ControlIds.Exposure, 3_000_000);
+
+        Assert.InRange(exposure.Max, 999_000, 1_000_000);
+        Assert.False(_api.LongExposureEnabled);
+        Assert.InRange(_api.ExposureMs, 999.0, 1000.0);
+    }
+
+    [Fact]
+    public void UnknownOrBadControlsAreRejectedWithoutTouchingTheCamera()
+    {
+        var backend = CreateBackend();
+        _api.ClearCalls();
+
+        Assert.False(backend.SetControl("binning", 2).Accepted);
+        Assert.False(backend.SetControl("nope", 1).Accepted);
+        Assert.False(backend.SetControl(ControlIds.Gain, double.NaN).Accepted);
+        Assert.Empty(_api.Calls);
+    }
+
+    [Fact]
+    public void SetControlBeforeOpenIsRejected()
+    {
+        var backend = CreateBackend(open: false);
+
+        Assert.False(backend.SetControl(ControlIds.Gain, 10).Accepted);
+    }
+
+    [Fact]
+    public void AFailingHardwareCallIsACameraExceptionButNotFatal()
+    {
+        var backend = CreateBackend();
+        var fatal = new List<string>();
+        backend.Fatal += fatal.Add;
+        _api.ExposureSetStatus = UEyeConst.InvalidParameter;
+
+        var ex = Assert.Throws<CameraException>(() => backend.SetControl(ControlIds.Exposure, 20_000));
+
+        Assert.Contains("set exposure", ex.Message);
+        Assert.Empty(fatal);
+    }
+
+    [Fact]
+    public void ALostCameraDuringAControlChangeIsFatal()
+    {
+        var backend = CreateBackend();
+        var fatal = new List<string>();
+        backend.Fatal += fatal.Add;
+        _api.ExposureSetStatus = UEyeConst.CameraNotConnected;
+
+        Assert.Throws<CameraException>(() => backend.SetControl(ControlIds.Exposure, 20_000));
+
+        Assert.Single(fatal);
+    }
+
+    // -- capture -----------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void FramesAreCopiedHonouringThePitchAndSentAsJpeg()
+    {
+        var backend = CreateBackend();
+        var sink = new CollectingSink();
+        _api.FillValue = 90;
+
+        backend.Start(sink);
+
+        Assert.True(sink.WaitForFrames(3), "no frames arrived");
+        backend.Stop();
+        var (data, kind, geometry) = sink.First();
+        Assert.Equal(FrameKind.Jpeg, kind);
+        Assert.Equal(new StreamGeometry(FakeUEyeApi.Width, FakeUEyeApi.Height, 1, PixelFormat.Gray8), geometry);
+        using var decoder = new WicGrayDecoder();
+        var image = decoder.Decode(data);
+        Assert.Equal((FakeUEyeApi.Width, FakeUEyeApi.Height), (image.Width, image.Height));
+        // The padding behind each row is 255: a copy that ignored the pitch would be far brighter than the 90 of the image.
+        double mean = image.Pixels.Average(p => (double)p);
+        Assert.InRange(mean, 88, 92);
+        Assert.True(backend.FramesProduced >= 3);
+        Assert.Equal(1, _api.CallCount("StartCapture"));
+    }
+
+    [Fact]
+    public void StopEndsCaptureAndTheBackendCanStartAgain()
+    {
+        var backend = CreateBackend();
+        var first = new CollectingSink();
+        backend.Start(first);
+        Assert.True(first.WaitForFrames(1));
+
+        backend.Stop();
+        backend.Stop(); // idempotent
+        Assert.Equal(1, _api.CallCount("StopCapture"));
+
+        var second = new CollectingSink();
+        backend.Start(second);
+        Assert.True(second.WaitForFrames(1));
+    }
+
+    [Fact]
+    public void StartingTwiceIsRejected()
+    {
+        var backend = CreateBackend();
+        backend.Start(new CollectingSink());
+
+        Assert.Throws<InvalidOperationException>(() => backend.Start(new CollectingSink()));
+    }
+
+    [Fact]
+    public void ThreeConsecutiveEmptyWaitsAreFatalAndReportedOnce()
+    {
+        var backend = CreateBackend();
+        var fatal = new List<string>();
+        var raised = new ManualResetEventSlim();
+        backend.Fatal += m =>
+        {
+            lock (fatal)
+            {
+                fatal.Add(m);
+            }
+
+            raised.Set();
+        };
+        _api.WaitStatus = UEyeConst.TimedOut;
+
+        backend.Start(new CollectingSink());
+
+        Assert.True(raised.Wait(TimeSpan.FromSeconds(5)), "no fatal error after repeated timeouts");
+        backend.Stop();
+        lock (fatal)
+        {
+            Assert.Single(fatal);
+            Assert.Contains("No frame", fatal[0]);
+        }
+    }
+
+    [Fact]
+    public void TwoTimeoutsBetweenFramesAreTolerated()
+    {
+        var backend = CreateBackend();
+        var fatal = new List<string>();
+        backend.Fatal += fatal.Add;
+        _api.ScriptWaitResults(UEyeConst.TimedOut, UEyeConst.TimedOut);
+        var sink = new CollectingSink();
+
+        backend.Start(sink);
+
+        Assert.True(sink.WaitForFrames(2));
+        Assert.Empty(fatal);
+    }
+
+    [Theory]
+    [InlineData(UEyeConst.CameraNotConnected)]
+    [InlineData(UEyeConst.InvalidHandle)]
+    [InlineData(UEyeConst.IoRequestFailed)]
+    public void ALostCameraSeenByTheCaptureLoopIsFatalAtOnce(int status)
+    {
+        var backend = CreateBackend();
+        var raised = new ManualResetEventSlim();
+        string? message = null;
+        backend.Fatal += m =>
+        {
+            message = m;
+            raised.Set();
+        };
+        _api.ScriptWaitResults(status);
+
+        backend.Start(new CollectingSink());
+
+        Assert.True(raised.Wait(TimeSpan.FromSeconds(5)));
+        Assert.Contains("Camera lost", message);
+    }
+
+    [Fact]
+    public void ARemovalEventIsFatalEvenWhileNothingIsCapturing()
+    {
+        var backend = CreateBackend();
+        var raised = new ManualResetEventSlim();
+        string? message = null;
+        backend.Fatal += m =>
+        {
+            message = m;
+            raised.Set();
+        };
+
+        _api.SignalRemoval();
+
+        Assert.True(raised.Wait(TimeSpan.FromSeconds(5)), "removal event was not noticed");
+        Assert.Contains("unplugged", message);
+    }
+
+    // -- close ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void DisposeReleasesEverythingInOrderAndOnlyOnce()
+    {
+        var backend = CreateBackend();
+        backend.Start(new CollectingSink());
+        _api.ClearCalls();
+
+        backend.Dispose();
+        backend.Dispose();
+
+        var calls = _api.Calls;
+        Assert.Equal(1, calls.Count(c => c == "ExitCamera"));
+        Assert.Equal(IdsBackend.BufferCount, calls.Count(c => c == "FreeImageMemory"));
+        Assert.Equal(0, _api.OpenBuffers);
+        Assert.True(calls.ToList().IndexOf("StopCapture") < calls.ToList().IndexOf("ExitImageQueue"));
+        Assert.True(calls.ToList().IndexOf("ClearSequence") < calls.ToList().IndexOf("FreeImageMemory"));
+        Assert.Equal("ExitCamera", calls[^1]); // the camera handle goes last
+        Assert.False(_api.IsOpen);
+    }
+
+    [Fact]
+    public void DisposingABackendThatWasNeverOpenedTouchesNothing()
+    {
+        var backend = CreateBackend(open: false);
+
+        backend.Dispose();
+
+        Assert.Empty(_api.Calls);
+    }
+
+    [Fact]
+    public void AfterAFatalErrorTheCameraIsStillReleased()
+    {
+        var backend = CreateBackend();
+        var raised = new ManualResetEventSlim();
+        backend.Fatal += _ => raised.Set();
+        _api.WaitStatus = UEyeConst.CameraNotConnected;
+        backend.Start(new CollectingSink());
+        Assert.True(raised.Wait(TimeSpan.FromSeconds(5)));
+
+        backend.Stop();
+        backend.Dispose();
+
+        Assert.Equal(1, _api.CallCount("ExitCamera"));
+    }
+}
+
+public class IdsBackendWithoutTheApiTests
+{
+    [Fact]
+    public void CreatingTheDefaultBackendNeverThrowsWhateverIsInstalled()
+    {
+        using var backend = IdsBackend.CreateDefault(90, new Logger(TextWriter.Null, LogLevel.Debug));
+
+        // Either there is no IDS runtime (nothing found) or there is one (whatever cameras it knows); never an exception.
+        var devices = backend.Probe();
+        Assert.NotNull(devices);
+    }
+
+    [Fact]
+    public void ABackendWithoutTheApiHasNoDevicesAndCannotOpen()
+    {
+        using var backend = new IdsBackend(null, 90, new Logger(TextWriter.Null, LogLevel.Debug));
+
+        Assert.Empty(backend.Probe());
+        var ex = Assert.Throws<CameraException>(() => backend.Open(new DeviceInfo("ids", "UI306xCP-M", Handle: "1")));
+        Assert.Contains("IDS Software Suite", ex.Message);
+    }
+}

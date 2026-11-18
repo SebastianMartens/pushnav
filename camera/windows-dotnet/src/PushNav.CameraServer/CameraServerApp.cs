@@ -143,7 +143,16 @@ internal static class CameraServerApp
         backend.Fatal += server.ReportFatal;
         try
         {
-            backend.Start(new LatestFrameSink(slot));
+            try
+            {
+                backend.Start(new LatestFrameSink(slot));
+            }
+            catch (CameraException ex)
+            {
+                log.Error($"Failed to start capture: {ex.Message}");
+                return ExitCodes.Fatal;
+            }
+
             stdout.WriteLine($"Listening on 127.0.0.1:{server.Port}");
             stdout.Flush();
             seams.OnListening?.Invoke(server.Port);
