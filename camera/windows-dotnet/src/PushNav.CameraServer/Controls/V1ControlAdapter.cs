@@ -8,7 +8,7 @@ namespace PushNav.CameraServer.Controls;
 /// <summary>
 /// Projects a backend's native controls onto protocol v1 (spec 5.3 / 7): only <c>exposure</c> and <c>gain</c>,
 /// both <c>int</c>, with exposure in the legacy <c>"100us"</c> unit so the existing UI formats it correctly.
-/// Native values stay in real units (microseconds); this is the only place that knows about the v1 unit.
+/// Native values stay in real units (microseconds); this is the only place that knows about the v1 unit and cap.
 /// </summary>
 internal static class V1ControlAdapter
 {
@@ -16,6 +16,13 @@ internal static class V1ControlAdapter
     public const double ExposureUnitMicroseconds = 100;
 
     public const string ExposureUnitTag = "100us";
+
+    /// <summary>
+    /// Longest exposure a v1 session may use: 1.5 s. The engine's frame-stall timeout is a fixed 2.0 s
+    /// (SPEC_PROTOCOL_CAMERA.md section 7), so a longer exposure makes it restart the camera server. Protocol v2 derives
+    /// the timeout from the frame interval (section 11.7) and lifts this cap for v2 sessions.
+    /// </summary>
+    public const double MaxExposureMicroseconds = 1_500_000;
 
     public static bool IsExposedInV1(string id) => id is ControlIds.Exposure or ControlIds.Gain;
 
@@ -44,7 +51,7 @@ internal static class V1ControlAdapter
         switch (id)
         {
             case ControlIds.Exposure:
-                nativeValue = v1Value * ExposureUnitMicroseconds;
+                nativeValue = Math.Min(v1Value * ExposureUnitMicroseconds, MaxExposureMicroseconds);
                 return true;
             case ControlIds.Gain:
                 nativeValue = v1Value;
@@ -58,7 +65,7 @@ internal static class V1ControlAdapter
     private static ControlJson ProjectExposure(ControlDescriptor c)
     {
         double min = Math.Max(1, Math.Ceiling(c.Min / ExposureUnitMicroseconds));
-        double max = Math.Max(min, Math.Floor(c.Max / ExposureUnitMicroseconds));
+        double max = Math.Max(min, Math.Floor(Math.Min(c.Max, MaxExposureMicroseconds) / ExposureUnitMicroseconds));
         double cur = Math.Clamp(Math.Round(c.Cur / ExposureUnitMicroseconds, MidpointRounding.AwayFromZero), min, max);
         return new ControlJson
         {

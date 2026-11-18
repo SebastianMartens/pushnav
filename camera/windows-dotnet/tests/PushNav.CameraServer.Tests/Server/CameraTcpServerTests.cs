@@ -85,6 +85,22 @@ public class CameraTcpServerTests
     }
 
     [Fact]
+    public void V1ClientCannotSetAnExposureLongerThanTheEngineStallTimeout()
+    {
+        using var h = ServerHarness.Start(new StubBackend(TimeSpan.FromMilliseconds(50)));
+        using var client = h.Connect();
+        var handshake = client.Handshake();
+        Assert.Equal(15_000, handshake.Controls.Single(c => c.Id == "exposure").Max); // stub offers up to 4 s natively
+
+        client.SetControl("exposure", 40_000); // 4 s in v1 units
+        client.ReadUntil(MessageType.ControlInfo);
+
+        var exposure = client.LastControlInfo!.Controls.Single(c => c.Id == "exposure");
+        Assert.Equal(15_000, exposure.Cur);
+        Assert.Equal(1_500_000, h.Backend.Controls.Single(c => c.Id == "exposure").Cur); // the camera really got 1.5 s
+    }
+
+    [Fact]
     public void SessionKeepsWorkingWhenTheLogOutputIsStuck()
     {
         // Regression: the engine never reads the server's stderr pipe; a blocking log write froze the session reader.

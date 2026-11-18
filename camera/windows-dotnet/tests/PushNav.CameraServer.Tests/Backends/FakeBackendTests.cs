@@ -286,6 +286,50 @@ public class FakeBackendTests
         Assert.Equal(25.0, Control(backend, "fps").Cur);
     }
 
+    [Theory]
+    [InlineData(10, 50_000, 100_000)]       // 10 fps, short exposure: the frame rate rules
+    [InlineData(1, 500_000, 1_000_000)]     // 1 fps floor, exposure fits
+    [InlineData(1, 1_200_000, 1_200_000)]   // exposure beyond the 1 fps floor stretches the frame
+    [InlineData(1, 4_000_000, 4_000_000)]
+    [InlineData(40.98, 92, 24_402.14)]
+    public void FrameIntervalFollowsTheSlowerOfFpsAndExposure(double fps, double exposureUs, double expectedUs)
+    {
+        Assert.Equal(expectedUs, FakeBackend.FrameIntervalUs(fps, exposureUs), 1);
+    }
+
+    [Fact]
+    public void ExposureLongerThanOneSecondStretchesTheFrameIntervalInsteadOfLyingAboutIt()
+    {
+        using var backend = OpenedSynthetic();
+        backend.SetControl("exposure", 1_200_000);
+        Assert.Equal(1.0, Control(backend, "fps").Cur); // fps is at its floor and cannot go lower
+        var times = new List<long>();
+        var sink = new TimestampSink(times);
+
+        backend.Start(sink);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (times.Count < 2 && sw.Elapsed < TimeSpan.FromSeconds(10))
+        {
+            Thread.Sleep(20);
+        }
+
+        backend.Stop();
+        Assert.True(times.Count >= 2, "no second frame");
+        double gapMs = System.Diagnostics.Stopwatch.GetElapsedTime(times[0], times[1]).TotalMilliseconds;
+        Assert.InRange(gapMs, 1_150, 1_900); // 1.2 s exposure, not the 1.0 s that 1 fps alone would give
+    }
+
+    private sealed class TimestampSink(List<long> times) : IFrameSink
+    {
+        public void OnFrame(ReadOnlySpan<byte> data, FrameKind kind, StreamGeometry geometry)
+        {
+            lock (times)
+            {
+                times.Add(System.Diagnostics.Stopwatch.GetTimestamp());
+            }
+        }
+    }
+
     [Fact]
     public void BinningChangesTheGeometryAndTheFrameSize()
     {

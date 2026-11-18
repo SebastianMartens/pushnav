@@ -16,7 +16,8 @@ namespace PushNav.CameraServer.Backends.Fake;
 /// Simulated behaviour:
 /// <list type="bullet">
 /// <item>exposure 92 us .. 4 s, gain 0..100, fps 1..40.98, binning 1 or 2 (2x2 halves the frame size);</item>
-/// <item>exposure priority (protocol 11.4.3): a longer exposure lowers fps; a higher fps is clamped to what the exposure allows;</item>
+/// <item>exposure priority (protocol 11.4.3): a longer exposure lowers fps; a higher fps is clamped to what the exposure allows;
+/// beyond 1 s (fps is already at its 1 fps floor) the frame interval simply follows the exposure;</item>
 /// <item>brightness follows exposure and gain, and is exactly the source image at the default values.</item>
 /// </list>
 /// </remarks>
@@ -364,7 +365,7 @@ internal sealed class FakeBackend : ICameraBackend
 
             while (!_stopping)
             {
-                double fps;
+                double intervalUs;
                 lock (_streamLock)
                 {
                     StreamGeometry geometry;
@@ -375,7 +376,7 @@ internal sealed class FakeBackend : ICameraBackend
                         geometry = GeometryFor(_binning);
                         source = SourceFor(_binning, index);
                         factor = BrightnessFactor(_exposureUs, _gain);
-                        fps = _fps;
+                        intervalUs = FrameIntervalUs(_fps, _exposureUs);
                     }
 
                     ReadOnlySpan<byte> pixels = source.Pixels;
@@ -397,7 +398,7 @@ internal sealed class FakeBackend : ICameraBackend
                 }
 
                 // Pace: next frame one interval after the previous deadline (no drift), but never faster than we can encode.
-                long interval = (long)(Stopwatch.Frequency / fps);
+                long interval = (long)(Stopwatch.Frequency * intervalUs / 1_000_000.0);
                 next += interval;
                 long now = Stopwatch.GetTimestamp();
                 if (next < now)
@@ -426,6 +427,13 @@ internal sealed class FakeBackend : ICameraBackend
             }
         }
     }
+
+    /// <summary>
+    /// Time between frames: one over the frame rate, but never shorter than the exposure. Below 1 fps the frame rate cannot
+    /// drop any further, so a longer exposure stretches the frame like the real camera's long-exposure mode does
+    /// (otherwise a 4 s exposure would still come out once a second).
+    /// </summary>
+    internal static double FrameIntervalUs(double fps, double exposureUs) => Math.Max(1_000_000.0 / fps, exposureUs);
 
     /// <summary>1.0 at the default exposure and gain (so default frames are the unmodified source image).</summary>
     internal static double BrightnessFactor(double exposureUs, double gain)

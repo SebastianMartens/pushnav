@@ -67,7 +67,7 @@ public class ProtocolJsonTests
         Assert.Equal("int", exposure.GetProperty("type").GetString());
         Assert.Equal("100us", exposure.GetProperty("unit").GetString());
         Assert.Equal(1, exposure.GetProperty("min").GetInt64());      // ceil(92 us / 100 us)
-        Assert.Equal(40_000, exposure.GetProperty("max").GetInt64()); // 4 s
+        Assert.Equal(15_000, exposure.GetProperty("max").GetInt64()); // 4 s native, capped at 1.5 s for v1 (engine stall timeout is 2 s)
         Assert.Equal(1, exposure.GetProperty("step").GetInt64());
         Assert.Equal(500, exposure.GetProperty("cur").GetInt64());    // 50 ms = 500 x 100 us
         var gain = controls[1];
@@ -113,6 +113,44 @@ public class ProtocolJsonTests
         Assert.Equal(42, gain);
         Assert.False(V1ControlAdapter.TryToNative("fps", 5, out _));
         Assert.False(V1ControlAdapter.TryToNative("binning", 2, out _));
+    }
+
+    [Fact]
+    public void V1ExposureIsCappedBelowTheEnginesFixedStallTimeout()
+    {
+        var native = new List<ControlDescriptor>
+        {
+            new() { Id = "exposure", Label = "Exposure", Kind = ControlKind.Int, Unit = "us", Min = 92, Max = 30_000_000, Step = 1, Cur = 3_000_000 },
+        };
+
+        var c = V1ControlAdapter.Project(native).Controls[0];
+
+        Assert.Equal(15_000, c.Max);          // 1.5 s in 100 us units
+        Assert.Equal(15_000, c.Cur);          // a value above the cap is shown as the cap
+        Assert.True(V1ControlAdapter.MaxExposureMicroseconds < 2_000_000, "must stay below the 2.0 s stall timeout");
+    }
+
+    [Fact]
+    public void V1CapDoesNotRaiseARangeThatIsAlreadyShorter()
+    {
+        var native = new List<ControlDescriptor>
+        {
+            new() { Id = "exposure", Label = "Exposure", Kind = ControlKind.Int, Unit = "us", Min = 100, Max = 500_000, Step = 1, Cur = 100_000 },
+        };
+
+        Assert.Equal(5_000, V1ControlAdapter.Project(native).Controls[0].Max);
+    }
+
+    [Theory]
+    [InlineData(1000, 100_000)]
+    [InlineData(15_000, 1_500_000)]
+    [InlineData(15_001, 1_500_000)]
+    [InlineData(40_000, 1_500_000)]
+    [InlineData(1_000_000_000, 1_500_000)]
+    public void V1SetExposureIsClampedToTheCap(double v1Value, double expectedMicroseconds)
+    {
+        Assert.True(V1ControlAdapter.TryToNative("exposure", v1Value, out double us));
+        Assert.Equal(expectedMicroseconds, us);
     }
 
     [Fact]
