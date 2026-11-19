@@ -1,7 +1,7 @@
 # SPEC_CAMERA_SERVER_WINDOWS.md — PushNav
 
-Version: 1.2 (2026-11-18: C server kept permanently side by side, server selection, upstream minimal-diff rules; 1.1: 25 mm reference lens, wide-field solver database)
-Status: Draft — awaiting approval, not yet implemented
+Version: 1.3 (2026-11-18: status after PRs #9, #10, #14; task 7 (v2) detailed and scheduled in `SPEC_CAMERA_CONTROLS.md` §10.8; Q2, Q5 resolved. 1.2: C server kept permanently side by side, server selection, upstream minimal-diff rules; 1.1: 25 mm reference lens, wide-field solver database)
+Status: Approved (PR #8). Tasks 1–6 mostly implemented (PRs #9, #10, #14, #15; open: 5.6, 5.9, 6.6–6.8; 6.2a not planned); task 7 (protocol v2) open; task 8 (UVC) not planned
 Date: 2026-11-18
 Target: Windows 10/11 x64
 Issue: SebastianMartens/pushnav#1 (IDS uEye UI-306xCP-M support)
@@ -395,7 +395,7 @@ timeouts with no removal event -> ERROR message + `exit(1)`.
 
 | Control | Source | Range on UI-306xCP-M |
 |---|---|---|
-| `exposure` (µs) | `is_Exposure` (`GET_EXPOSURE_RANGE`, `SET_EXPOSURE`); long-exposure mode switched on transparently above the normal max | 92 µs – 30 s (capped, see §11 Q5) |
+| `exposure` (µs) | `is_Exposure` (`GET_EXPOSURE_RANGE`, `SET_EXPOSURE`); long-exposure mode switched on transparently above the normal max | 92 µs – 4 s (sensor: 30 s; capped at 4 s, §11 Q5; v1 view 1.5 s, Q13) |
 | `fps` | `is_SetFrameRate`, `is_GetFrameTimeRange` | 1.0 – 41 fps (depends on pixel clock) |
 | `gain` | `is_SetHardwareGain` master (0–100 scaled) | 0 – 100 |
 | `binning` | `is_SetBinning` (`IS_GET_SUPPORTED_BINNING` decides the options) | `1`, `2` |
@@ -738,16 +738,16 @@ adding a new workflow:
 | # | Question | Needs | Blocks approval? |
 |---|---|---|---|
 | Q1 | Is this UI-306xCP-M listed by IDS peak's uEye Transport Layer (IDS Software Suite 4.97 is installed)? Only matters if the uEye API path fails. Check the label/revision and, optionally, install IDS peak and see if `ids_peak_cockpit` lists it. | Sebastian + camera | No (fallback only) |
-| Q2 | uEye headers/manual are not installed (`develop/` has only `bin/`). Install the IDS SDK developer option (headers + manual) on the dev box, or accept constants derived from the API docs? | Sebastian | No |
+| Q2 | ~~uEye headers/manual are not installed (`develop/` has only `bin/`). Install the IDS SDK developer option (headers + manual) on the dev box, or accept constants derived from the API docs?~~ **Resolved in practice (tasks 5.1–5.5):** constants derived from the documented API (`UEyeConst.cs`) and verified on the camera. | — | — |
 | Q3 | ~~Lens / focal length~~ **Resolved:** 25 mm Basler lens (reference configuration, §2). Follow-up [HW] checks (solve rate/time with the wide database, centroid parameters at ~48/97"/px) are tracked in `SPEC_CAMERA_CONTROLS.md` §9 Q6–Q8. | — | No |
 | Q4 | Is q90 grayscale JPEG good enough for solving faint fields with the IMX174, or do we need FRAME_RAW soon? Compare solve rate on a real sky session (JPEG vs raw dump). | Sebastian + camera + sky | No |
-| Q5 | Max exposure to offer in the UI: the sensor allows 30 s; plate solving rarely needs > 2 s, and long frames make the UI sluggish. Proposed cap: 4 s, configurable. | Sebastian | No (default proposed) |
-| Q6 | Do the OV9281 modules support `KSPROPERTY_CAMERACONTROL_EXTENDED_EXPOSUREMODE` (µs exposure) under the inbox UVC driver, or only log2 steps? | Sebastian + OV9281 module | No |
+| Q5 | ~~Max exposure to offer in the UI: the sensor allows 30 s; plate solving rarely needs > 2 s, and long frames make the UI sluggish. Proposed cap: 4 s, configurable.~~ **Resolved 2026-11-18 (Sebastian, `SPEC_CAMERA_CONTROLS.md` §9 Q2): 4 s.** The IDS and Fake backends cap at 4 s (`MaxExposureUs`); the engine's `camera.max_exposure_us` can lower it further. | — | — |
+| Q6 | ~~Do the OV9281 modules support `KSPROPERTY_CAMERACONTROL_EXTENDED_EXPOSUREMODE` (µs exposure) under the inbox UVC driver, or only log2 steps?~~ **Dropped 2026-11-18:** no OV9281 available (Q10), and task 8 is not planned. | — | — |
 | Q7 | ~~Does the uEye driver release the camera after `TerminateProcess` without `is_ExitCamera` (Python's `process.terminate()` on Windows)? Verify by kill + respawn.~~ **Resolved (task 5.8): yes.** `taskkill /F` on a streaming server, three times in a row on a UI-306xCP-M (driver 4.97): the process was gone 0.3 s later and every respawn opened the camera and streamed (3.7 s from start to listening). The engine's own recovery after a kill (RECONNECTING, then SETUP) took about 6 s. One caveat: a kill that lands while the server is already closing the camera can leave the process in "terminating" for several seconds (the driver call has to return first), so a respawn in that window would be expected to find the camera busy (not tested); the engine's backoff would cover it. | camera | No |
 | Q8 | ~~OK to runtime-load the user-installed, proprietary `ueye_api_64.dll` from GPL-3 code (no redistribution)?~~ **Resolved 2026-11-18: yes, documented per §3.4 (task 6.4).** | Sebastian | — |
 | Q9 | ~~Is the WIC JPEG encoder within the 15 ms budget for 1936x1216 GRAY8? If not, switch to static libjpeg-turbo.~~ **Resolved 2026-11-18 (task 4.3): yes, median 3.6 ms at 1936x1216 and 0.95 ms at 968x608 (Release, dev laptop); no fallback needed.** | measurement | No |
-| Q10 | **[HW: OV9281]** With the default `"dotnet"`, how much later does an OV9281 user get frames than with `"c"`? The delay covers the C# start, MF enumeration, code-3 exit and the C server start. Target: about 1 s or less (§8.3). | Sebastian + OV9281 module | No |
-| Q11 | Should the optional C# UVC backend ever become the default for OV9281 (`camera.dotnet_uvc = true`)? Proposed: no decision now; the C server stays the default path for UVC. | Sebastian, later | No |
+| Q10 | ~~**[HW: OV9281]** With the default `"dotnet"`, how much later does an OV9281 user get frames than with `"c"`?~~ **Resolved 2026-11-18 (Sebastian): the IDS camera is the only camera; nothing else is hardware-tested.** The new features target the C# server only; with an upstream server they are not available and not tested (`SPEC_CAMERA_CONTROLS.md` §1.2). An OV9281 user still works via the code-3 fallback (pytest-covered, task 6.2), just after the C# server's device wait; the fast exit (6.2a) is not planned. | — | — |
+| Q11 | ~~Should the optional C# UVC backend ever become the default for OV9281?~~ **Dropped 2026-11-18:** task 8 is not planned (no UVC camera to test with, Q10). The C server stays the UVC path. | — | — |
 | Q12 | Add the server choice to the Settings UI (task 6.7)? Proposed: optional, later. | Sebastian | No |
 | Q13 | ~~Longest exposure a v1 client may set: the sensor allows 30 s, the engine's v1 stall timeout is a fixed 2.0 s.~~ **Resolved (review of tasks 1-4): the v1 view caps exposure at 1.5 s and clamps SET_CONTROL to it (`V1ControlAdapter`). v2 sessions are not capped (adaptive stall timeout, protocol §11.7).** | — | No |
 
@@ -756,8 +756,8 @@ adding a new workflow:
 ## 12. Implementation Tasks
 
 Dependency: tasks 1–6 do not depend on #3. Task 8 is optional and has no deadline. Task 7 (v2 controls in the
-C# server) needs the protocol v2 section approved and lands together with
-`SPEC_CAMERA_CONTROLS.md` tasks. **[HW]** = needs Sebastian + the real
+C# server) lands in the slices of `SPEC_CAMERA_CONTROLS.md` §10.8 (the
+protocol v2 section was approved in PR #8). **[HW]** = needs Sebastian + the real
 camera. **[INFRA]** = route to the infra agent.
 
 ### 1. Skeleton
@@ -789,7 +789,7 @@ camera. **[INFRA]** = route to the infra agent.
 - [ ] 5.6 Device removal -> exit(1); engine recovers when re-plugged. Test **[HW]**: unplug/replug during streaming. *(Implemented: removal events plus the capture loop's error and timeout handling, all covered by xUnit with the fake API. Still open: the real unplug/replug, which needs a person at the camera.)*
 - [x] 5.7 Exit code 3 when no supported camera is present. Exit 3 immediately when only an allowlisted UVC camera is seen and UVC is disabled (§8.3; needs the MF enumeration from task 6.2a). Test: xUnit (fake device lists) + manual without camera. *(Done for "no camera": xUnit with an empty camera list and with no API at all. The "immediate exit for a UVC camera" half stays with 6.2a. The manual run without the camera is part of the 5.6 steps for Sebastian, since the camera cannot be unplugged remotely.)*
 - [x] 5.8 Kill/respawn without `is_ExitCamera` (Q7). Test **[HW]**: `taskkill /F` then restart, camera opens. *(Done: see Q7.)*
-- [ ] 5.9 Night test: plate solve with the IDS camera (25 mm lens), at least one target tracked. Needs the wide solver database and per-profile FOV from `SPEC_CAMERA_CONTROLS.md` tasks 4.1–4.5. Test **[HW]** + sky.
+- [ ] 5.9 Night test: plate solve with the IDS camera (25 mm lens), at least one target tracked. Needs the wide solver database and per-profile FOV from `SPEC_CAMERA_CONTROLS.md` slice S1 (§10.8). Test **[HW]** + sky.
 
 ### 6. Engine, build, packaging
 - [x] 6.1 New `evf/camera/server_select.py`: `camera.windows_server` (`"dotnet"` default, or `"c"`), `PUSHNAV_CAMERA_SERVER` override, warning on invalid values, missing-exe fallback in both directions, ignored on macOS/Linux. Plus one config default line in `config/manager.py`. Test: new `tests/test_server_select.py` (dev/release layouts, both settings, env override, each exe missing, neither present, non-Windows). *(Done. The dev layout is `camera/windows-dotnet/publish/camera_server_dotnet.exe` (the `build.bat` output) and `camera/windows/camera_server.exe`; the release layout has both next to the app exe. The layout comes from one small helper, `evf.paths.windows_camera_server_paths()` (marked `# fork:`; §8.5 allows "at most one small helper" in `paths.py`). Dev only: `PUSHNAV_CAMERA_SERVER_ARGS` passes extra arguments to the C# server, e.g. `--backend fake --fake-images tests/samples` (task 3.3).)*
@@ -800,7 +800,7 @@ camera. **[INFRA]** = route to the infra agent.
   - kill both exe names.
 
   Test: pytest with two fake server scripts (one exits 3); `"c"` never starts the C# script; existing `tests/test_subprocess_mgr.py` unchanged and green. *(Done: `tests/test_subprocess_mgr_select.py`. The fallback restarts the connect deadline, because the C# server may have used up most of it with its 8 s device wait before exiting with code 3. An explicit `binary_path` bypasses the selection.)*
-- [ ] 6.2a MF device enumeration in the C# server (symbolic links, VID/PID, allowlist incl. `PUSHNAV_CAMERA_IDS`), used by the fast exit in §8.3. Test: xUnit with a fake enumerator; **[HW: OV9281]** OV9281 attached → exit 3 in < 1 s, the C server starts, frames arrive (Q10).
+- [ ] 6.2a *(Not planned, Q10: no UVC camera to test with; the code-3 fallback after the device wait stays.)* MF device enumeration in the C# server (symbolic links, VID/PID, allowlist incl. `PUSHNAV_CAMERA_IDS`), used by the fast exit in §8.3.
 - [x] 6.3 `build_windows.bat` Phase 1a (skips with a warning when `dotnet` is missing) + copy into the release dir (`pushnav.iss` needs no change). Test: local build with and without the .NET SDK on `PATH`; with it, the zip/installer contains both exes.
 - [x] 6.4 Docs: `docs/hardware.md` IDS section (install IDS Software Suite, supported model, licensing note), a `README.md` "Third-party software" note on the proprietary, separately installed IDS runtime that is loaded at runtime and never bundled (§3.4), a `SPEC_BUILD_RELEASE.md` §6.1 line, and a `CLAUDE.md` build line. Test: review.
 - [x] 6.5 **[INFRA]** Add job `camera-server-windows` to `.github/workflows/test.yml` (xUnit, AOT publish, conformance against the exe, artifact; §10.3). Test: job green on the PR; existing `python`/`web` jobs unchanged.
@@ -808,12 +808,21 @@ camera. **[INFRA]** = route to the infra agent.
 - [ ] 6.7 *(Optional, later; Q12)* Settings UI select "Camera server: C# (default) / C" that writes `camera.windows_server` and triggers "Retry camera". Test: vitest + manual.
 - [ ] 6.8 Upstream-merge check before the PR: `git diff upstream/main -- camera/windows/` is empty, and every edited upstream file is in the §8.5 table.
 
-### 7. Protocol v2 in the server (after #3 approval)
-- [ ] 7.1 v2 handshake + capabilities in HELLO. Test: conformance v2 against fake.
-- [ ] 7.2 v2 controls for IDS (`exposure` µs, `fps`, `gain`, `binning`) + coupling + STREAM_INFO on binning. Test: xUnit (fake API) + **[HW]** binning 2x2 shows 968x608 in the app.
-- [ ] 7.3 Optional FRAME_RAW support (capability only, off unless requested). Test: conformance v2.
+### 7. Protocol v2 in the server (#3 approved in PR #8)
 
-### 8. UVC backend (Media Foundation): optional, no deadline, off by default
+Scheduled in the slices of `SPEC_CAMERA_CONTROLS.md` §10.8: 7.0 in S1,
+7.1–7.2 in S5, 7.3 optional after that.
+
+- [ ] 7.0 HELLO extras in **every** session, no version change: `camera_key` (`DeviceInfo.CameraKey`, e.g. `ids:1409:3060`), `camera_serial` when known, `capabilities.sensor` (`width`, `height`, `pixel_size_um`, `mono`; IDS from the sensor info, 5.86 µm on the UI-306xCP-M; Fake: the IDS values). No `max_protocol_version` yet. A v1 client ignores unknown HELLO keys (protocol §11.2), so this is safe before v2 exists, and it fixes the engine's profile key early (`SPEC_CAMERA_CONTROLS.md` §4.2). Test: xUnit on the HELLO JSON; conformance v1 suite unchanged and green against the exe.
+- [ ] 7.1 v2 handshake and session (Fake backend first): HELLO `max_protocol_version: 2`, `capabilities.frame_formats` / `stream_info: true`; accept a client `protocol_version` of 1 or 2 (`ProtocolInfo` gets min/max; anything else stays an ERROR). In a v2 session: CONTROL_INFO with the backend's native descriptors (`exposure` in µs up to the backend cap of 4 s, **no** 1.5 s v1 cap; `fps`; `gain` raw; `binning` where supported), CONTROL_INFO with all ranges after every SET_CONTROL, STREAM_INFO (generation 1) after the first CONTROL_INFO, STREAM_INFO again (same generation) when `frame_interval_us` changes, and `reconfiguring` → `streaming` (generation + 1) around a binning change before the first frame of the new size. v1 sessions stay exactly as today (`V1ControlAdapter`). Test: xUnit (session, Fake binning); `tests/test_camera_conformance.py` v2 vectors 1–5 against the exe with `--backend fake`.
+- [ ] 7.2 IDS v2: binning through `is_SetBinning` (options from `IS_GET_SUPPORTED_BINNING`) with the in-process restart of §5.5 and STREAM_INFO; `fps` advertised in v2; coupling (exposure priority) reported in CONTROL_INFO; long-exposure mode in v2 sessions per `SPEC_CAMERA_CONTROLS.md` §9 Q12. Test: xUnit with `FakeUEyeApi` (binning restart < 500 ms budget, STREAM_INFO order, long-mode exit wrapped in `reconfiguring`); **[HW]** conformance suite with `PUSHNAV_CONFORMANCE_BACKEND=ids` incl. v2 vectors; binning 2x2 shows 968x608 in the app.
+- [ ] 7.3 Optional FRAME_RAW support (capability only, off unless requested). Test: conformance v2 vector 6.
+
+### 8. UVC backend (Media Foundation): not planned (Q10, Q11)
+
+Kept for reference only. Sebastian has no UVC camera to test with, and the
+C server stays the UVC path.
+
 - [ ] 8.1 `UvcBackend` on top of the enumeration from 6.2a, behind `--enable-uvc` / `camera.dotnet_uvc`; `--list` shows UVC devices. Test **[HW: OV9281]**: lists the module like the C server's diagnostic.
 - [ ] 8.2 Source reader MJPG passthrough at 1280x720, lowest fps; YUY2 fallback encoded. Test **[HW: OV9281]**.
 - [ ] 8.3 Exposure/gain via `IAMCameraControl`/`IAMVideoProcAmp` (v1 units), auto exposure off. Test **[HW: OV9281]**.
