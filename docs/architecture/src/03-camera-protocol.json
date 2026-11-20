@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Camera protocol (v1) and recovery",
+    "subtitle": "Reflects commit e921d73 (2026-11-19)",
+    "output": "camera-protocol.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1200,
+      753
+    ],
+    "column_fit": "spread"
+  },
+  "participants": [
+    {
+      "id": "sm",
+      "type": "database",
+      "label": "StateMachine"
+    },
+    {
+      "id": "mgr",
+      "type": "backend",
+      "label": "SubprocessManager"
+    },
+    {
+      "id": "client",
+      "type": "backend",
+      "label": "CameraClient"
+    },
+    {
+      "id": "server",
+      "type": "external",
+      "label": "Camera server"
+    }
+  ],
+  "segments": [
+    {
+      "from": 156,
+      "to": 294,
+      "label": "Spawn + handshake"
+    },
+    {
+      "from": 296,
+      "to": 472,
+      "label": "Streaming + controls"
+    },
+    {
+      "from": 474,
+      "to": 594,
+      "label": "Failure + recovery"
+    },
+    {
+      "from": 596,
+      "to": 684,
+      "label": "Planned v2"
+    }
+  ],
+  "messages": [
+    {
+      "from": "mgr",
+      "to": "server",
+      "y": 172,
+      "label": "spawn camera_server (Popen)",
+      "variant": "emphasis"
+    },
+    {
+      "from": "client",
+      "to": "server",
+      "y": 200,
+      "label": "TCP connect 127.0.0.1:8764, retried up to 15 s",
+      "variant": "default"
+    },
+    {
+      "from": "server",
+      "to": "client",
+      "y": 228,
+      "label": "HELLO (protocol_version 1, camera info)",
+      "variant": "emphasis"
+    },
+    {
+      "from": "client",
+      "to": "server",
+      "y": 256,
+      "label": "HELLO (protocol_version 1, app evf)",
+      "variant": "emphasis"
+    },
+    {
+      "from": "server",
+      "to": "client",
+      "y": 284,
+      "label": "CONTROL_INFO (exposure, gain ranges)",
+      "variant": "return"
+    },
+    {
+      "from": "server",
+      "to": "client",
+      "y": 312,
+      "label": "FRAME (JPEG), kept as latest frame",
+      "variant": "emphasis"
+    },
+    {
+      "from": "client",
+      "to": "server",
+      "y": 340,
+      "label": "SET_CONTROL {id, value}",
+      "variant": "default"
+    },
+    {
+      "from": "server",
+      "to": "client",
+      "y": 368,
+      "label": "CONTROL_INFO (applied values)",
+      "variant": "return"
+    },
+    {
+      "from": "client",
+      "to": "server",
+      "y": 396,
+      "label": "GET_CONTROLS",
+      "variant": "default"
+    },
+    {
+      "from": "server",
+      "to": "client",
+      "y": 424,
+      "label": "CONTROL_INFO",
+      "variant": "return"
+    },
+    {
+      "from": "server",
+      "to": "client",
+      "y": 452,
+      "label": "ERROR (UTF-8 text); if fatal, close + exit(1)",
+      "variant": "dashed"
+    },
+    {
+      "from": "mgr",
+      "to": "client",
+      "y": 490,
+      "label": "monitor every 0.5 s: disconnected, or no FRAME > 2.0 s",
+      "variant": "security"
+    },
+    {
+      "from": "mgr",
+      "to": "sm",
+      "y": 518,
+      "label": "RECONNECTING",
+      "variant": "security"
+    },
+    {
+      "from": "mgr",
+      "to": "server",
+      "y": 546,
+      "label": "attempt 1 of 5: respawn after 1 s (then 2, 4, 8, 15 s)",
+      "variant": "emphasis"
+    },
+    {
+      "from": "mgr",
+      "to": "sm",
+      "y": 574,
+      "label": "SETUP when connected, ERROR after 5 failed attempts",
+      "variant": "return"
+    },
+    {
+      "from": "server",
+      "to": "client",
+      "y": 612,
+      "label": "HELLO + max_protocol_version 2 (planned, #3)",
+      "variant": "dashed"
+    },
+    {
+      "from": "client",
+      "to": "server",
+      "y": 640,
+      "label": "HELLO protocol_version 2 (planned, #3)",
+      "variant": "dashed"
+    },
+    {
+      "from": "server",
+      "to": "client",
+      "y": 668,
+      "label": "CONTROL_INFO, STREAM_INFO, FRAME (planned, #3)",
+      "variant": "dashed"
+    }
+  ]
+}

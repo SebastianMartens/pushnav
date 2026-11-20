@@ -1,0 +1,373 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Camera servers per platform",
+    "subtitle": "Reflects commit e921d73 (2026-11-19)",
+    "output": "camera-servers.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1270,
+      650
+    ],
+    "repository": {
+      "url": "https://github.com/SebastianMartens/pushnav",
+      "revision": "e921d73113377063e0b6f9688702cd12fa1a68a5"
+    }
+  },
+  "components": [
+    {
+      "id": "mgr",
+      "type": "backend",
+      "label": "SubprocessManager",
+      "sublabel": "Python engine",
+      "pos": [
+        50,
+        130
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/camera/subprocess_mgr.py",
+          "line": 40,
+          "label": "SubprocessManager"
+        }
+      ]
+    },
+    {
+      "id": "select",
+      "type": "backend",
+      "label": "server_select.py",
+      "sublabel": "missing exe: use the other",
+      "pos": [
+        50,
+        400
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/camera/server_select.py",
+          "line": 142,
+          "label": "build_plan"
+        }
+      ]
+    },
+    {
+      "id": "mac",
+      "type": "backend",
+      "label": "macOS server",
+      "sublabel": "Swift, AVFoundation",
+      "pos": [
+        370,
+        40
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "camera/mac/Sources/CameraServer/main.swift",
+          "label": "main.swift"
+        }
+      ]
+    },
+    {
+      "id": "linux",
+      "type": "backend",
+      "label": "Linux server",
+      "sublabel": "C, V4L2",
+      "pos": [
+        370,
+        130
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "camera/linux/camera_server.c",
+          "label": "camera_server.c"
+        }
+      ]
+    },
+    {
+      "id": "winc",
+      "type": "backend",
+      "label": "Windows C server",
+      "sublabel": "C, DirectShow",
+      "pos": [
+        370,
+        220
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "camera/windows/camera_server.c",
+          "label": "camera_server.c"
+        }
+      ]
+    },
+    {
+      "id": "wincs",
+      "type": "backend",
+      "label": "Windows C# server",
+      "sublabel": ".NET 10, Native AOT",
+      "pos": [
+        370,
+        400
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "camera/windows-dotnet/src/PushNav.CameraServer/CameraServerApp.cs",
+          "label": "CameraServerApp"
+        }
+      ]
+    },
+    {
+      "id": "ov9281",
+      "type": "external",
+      "label": "OV9281 UVC modules",
+      "sublabel": "built-in VID/PID allowlist",
+      "pos": [
+        700,
+        130
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "ids",
+      "type": "backend",
+      "label": "IDS backend",
+      "sublabel": "uEye API, default",
+      "pos": [
+        700,
+        340
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "camera/windows-dotnet/src/PushNav.CameraServer/Backends/Ids/IdsBackend.cs",
+          "line": 22,
+          "label": "IdsBackend"
+        }
+      ]
+    },
+    {
+      "id": "fake",
+      "type": "backend",
+      "label": "Fake backend",
+      "sublabel": "dev and CI, no hardware",
+      "pos": [
+        700,
+        430
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "camera/windows-dotnet/src/PushNav.CameraServer/Backends/Fake/FakeBackend.cs",
+          "line": 24,
+          "label": "FakeBackend"
+        }
+      ]
+    },
+    {
+      "id": "uvc",
+      "type": "backend",
+      "label": "UVC backend",
+      "sublabel": "Media Foundation, not built",
+      "pos": [
+        700,
+        520
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "idscam",
+      "type": "external",
+      "label": "IDS UI-306xCP-M",
+      "sublabel": "IDS Software Suite",
+      "pos": [
+        1050,
+        340
+      ],
+      "size": [
+        180,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Upstream",
+      "wraps": [
+        "mac",
+        "linux",
+        "winc",
+        "ov9281"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "Fork only",
+      "wraps": [
+        "select",
+        "wincs",
+        "ids",
+        "fake",
+        "uvc",
+        "idscam"
+      ],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-mac",
+      "from": "mgr",
+      "to": "mac",
+      "label": "spawn",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "c-linux",
+      "from": "mgr",
+      "to": "linux",
+      "label": "spawn",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-select",
+      "from": "mgr",
+      "to": "select",
+      "label": "Windows",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "c-select-c",
+      "from": "select",
+      "to": "winc",
+      "label": "\"c\"",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "c-select-cs",
+      "from": "select",
+      "to": "wincs",
+      "label": "\"dotnet\" default",
+      "variant": "emphasis"
+    },
+    {
+      "id": "c-fallback",
+      "from": "wincs",
+      "to": "winc",
+      "label": "exit 3",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "c-mac-cam",
+      "from": "mac",
+      "to": "ov9281"
+    },
+    {
+      "id": "c-linux-cam",
+      "from": "linux",
+      "to": "ov9281"
+    },
+    {
+      "id": "c-winc-cam",
+      "from": "winc",
+      "to": "ov9281"
+    },
+    {
+      "id": "c-ids",
+      "from": "wincs",
+      "to": "ids"
+    },
+    {
+      "id": "c-fake",
+      "from": "wincs",
+      "to": "fake",
+      "label": "--backend fake",
+      "variant": "dashed"
+    },
+    {
+      "id": "c-uvc",
+      "from": "wincs",
+      "to": "uvc",
+      "label": "planned",
+      "variant": "dashed"
+    },
+    {
+      "id": "c-idscam",
+      "from": "ids",
+      "to": "idscam",
+      "label": "uEye API"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Server selection (Windows only)",
+      "items": [
+        "camera.windows_server: \"dotnet\" (default) or \"c\"; env PUSHNAV_CAMERA_SERVER overrides it",
+        "Selected exe missing: warning, then the other exe starts; neither: FileNotFoundError",
+        "Ignored on macOS and Linux"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Exit code 3 fallback",
+      "items": [
+        "Only the C# server exits 3 for no supported camera",
+        "With \"dotnet\", the C server then starts in the same attempt, using no backoff step",
+        "The server that connected is remembered for recovery"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Fork vs upstream",
+      "items": [
+        "The C server stays unmodified next to the C# server",
+        "The UVC backend is not registered in the C# server today",
+        "SubprocessManager is upstream code with small \"# fork:\" hooks into server_select"
+      ]
+    }
+  ]
+}
