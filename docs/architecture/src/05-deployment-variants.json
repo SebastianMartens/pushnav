@@ -1,0 +1,334 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Deployment variants",
+    "subtitle": "Reflects commit e921d73 (2026-11-19)",
+    "output": "deployment-variants.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1230,
+      540
+    ],
+    "repository": {
+      "url": "https://github.com/SebastianMartens/pushnav",
+      "revision": "e921d73113377063e0b6f9688702cd12fa1a68a5"
+    }
+  },
+  "components": [
+    {
+      "id": "nuitka",
+      "type": "cloud",
+      "label": "Nuitka standalone build",
+      "sublabel": "build_mac, build_linux, build_windows",
+      "pos": [
+        30,
+        60
+      ],
+      "size": [
+        190,
+        64
+      ],
+      "sources": [
+        {
+          "path": "scripts/build_linux.sh",
+          "line": 81,
+          "label": "Nuitka call"
+        },
+        {
+          "path": "scripts/build_windows.bat",
+          "line": 144,
+          "label": "Nuitka call"
+        }
+      ]
+    },
+    {
+      "id": "pkgs",
+      "type": "cloud",
+      "label": "Installable package",
+      "sublabel": "dmg, AppImage + tar.gz, zip + installer",
+      "pos": [
+        290,
+        60
+      ],
+      "size": [
+        210,
+        64
+      ]
+    },
+    {
+      "id": "desktop",
+      "type": "backend",
+      "label": "PushNav desktop app",
+      "sublabel": "engine, window, camera server",
+      "pos": [
+        570,
+        60
+      ],
+      "size": [
+        210,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/main.py",
+          "label": "main.py"
+        }
+      ]
+    },
+    {
+      "id": "deb",
+      "type": "cloud",
+      "label": "pushnav-headless .deb",
+      "sublabel": "arm64, bundled Python, no Nuitka",
+      "pos": [
+        30,
+        220
+      ],
+      "size": [
+        190,
+        64
+      ],
+      "sources": [
+        {
+          "path": "scripts/build_headless_deb.sh",
+          "label": "build_headless_deb.sh"
+        },
+        {
+          "path": "packaging/headless/debian/postinst",
+          "label": "postinst"
+        }
+      ]
+    },
+    {
+      "id": "unit",
+      "type": "backend",
+      "label": "systemd service",
+      "sublabel": "pushnav-headless, user pushnav",
+      "pos": [
+        290,
+        220
+      ],
+      "size": [
+        210,
+        64
+      ],
+      "sources": [
+        {
+          "path": "packaging/headless/pushnav-headless.service",
+          "label": "unit file"
+        }
+      ]
+    },
+    {
+      "id": "headless",
+      "type": "backend",
+      "label": "Headless engine",
+      "sublabel": "--no-window, camera watchdog",
+      "pos": [
+        570,
+        220
+      ],
+      "size": [
+        210,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/main.py",
+          "line": 211,
+          "label": "no_window branch"
+        }
+      ]
+    },
+    {
+      "id": "hotspot",
+      "type": "cloud",
+      "label": "Wi-Fi hotspot",
+      "sublabel": "first-boot user-data",
+      "pos": [
+        870,
+        220
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "packaging/headless/user-data",
+          "label": "user-data"
+        }
+      ]
+    },
+    {
+      "id": "phone",
+      "type": "external",
+      "label": "Phone browser",
+      "sublabel": "web UI :8765",
+      "pos": [
+        1070,
+        220
+      ],
+      "size": [
+        130,
+        64
+      ]
+    },
+    {
+      "id": "jumper",
+      "type": "external",
+      "label": "Debug jumper",
+      "sublabel": "GPIO21 to GND",
+      "pos": [
+        290,
+        390
+      ],
+      "size": [
+        210,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/engine/debug_pin.py",
+          "label": "debug_pin"
+        }
+      ]
+    },
+    {
+      "id": "leds",
+      "type": "external",
+      "label": "Status LEDs",
+      "sublabel": "ACT and PWR",
+      "pos": [
+        570,
+        390
+      ],
+      "size": [
+        210,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/engine/status_led.py",
+          "label": "status_led"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Desktop: macOS, Linux, Windows",
+      "wraps": [
+        "nuitka",
+        "pkgs",
+        "desktop"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "Headless Raspberry Pi",
+      "wraps": [
+        "deb",
+        "unit",
+        "headless",
+        "hotspot",
+        "jumper",
+        "leds"
+      ],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-package",
+      "from": "nuitka",
+      "to": "pkgs",
+      "label": "package"
+    },
+    {
+      "id": "c-install",
+      "from": "pkgs",
+      "to": "desktop",
+      "label": "install"
+    },
+    {
+      "id": "c-apt",
+      "from": "deb",
+      "to": "unit",
+      "label": "apt install"
+    },
+    {
+      "id": "c-exec",
+      "from": "unit",
+      "to": "headless",
+      "label": "ExecStart"
+    },
+    {
+      "id": "c-led",
+      "from": "headless",
+      "to": "leds",
+      "label": "status pattern",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        675,
+        337
+      ]
+    },
+    {
+      "id": "c-jumper",
+      "from": "jumper",
+      "to": "unit",
+      "label": "debug_pin",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelAt": [
+        395,
+        337
+      ]
+    },
+    {
+      "id": "c-http",
+      "from": "hotspot",
+      "to": "headless",
+      "label": "192.168.77.1"
+    },
+    {
+      "id": "c-wifi",
+      "from": "phone",
+      "to": "hotspot",
+      "label": "Wi-Fi"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Desktop builds",
+      "items": [
+        "macOS: .app, then dmgbuild .dmg",
+        "Linux: tar.gz and AppImage",
+        "Windows: zip and Inno Setup installer"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Headless .deb",
+      "items": [
+        "Built in an arm64 bookworm container; runs on bookworm and trixie",
+        "No Nuitka and no pywebview or PyQt6",
+        "Root ExecStartPre steps: led_helper take, debug_pin"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Pi extras",
+      "items": [
+        "The hotspot comes from the ready-made SD card user-data, not the .deb",
+        "led.enabled: false in config.json turns the LEDs off"
+      ]
+    }
+  ]
+}

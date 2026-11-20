@@ -1,0 +1,382 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "PushNav system overview",
+    "subtitle": "Reflects commit e921d73 (2026-11-19)",
+    "output": "system-overview.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/SebastianMartens/pushnav",
+      "revision": "e921d73113377063e0b6f9688702cd12fa1a68a5"
+    },
+    "viewBox": [
+      1230,
+      600
+    ]
+  },
+  "components": [
+    {
+      "id": "stellarium",
+      "type": "external",
+      "label": "Stellarium",
+      "sublabel": "desktop, telescope plugin",
+      "pos": [
+        10,
+        50
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "lxclients",
+      "type": "external",
+      "label": "LX200 clients",
+      "sublabel": "SkySafari, Stellarium Mobile",
+      "pos": [
+        10,
+        175
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "phone",
+      "type": "external",
+      "label": "Phone browser",
+      "sublabel": "mobile web UI",
+      "pos": [
+        10,
+        310
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "stellsrv",
+      "type": "backend",
+      "label": "Stellarium server",
+      "sublabel": "binary, TCP :10001",
+      "pos": [
+        260,
+        50
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/stellarium/server.py",
+          "line": 76,
+          "label": "StellariumServer"
+        }
+      ]
+    },
+    {
+      "id": "lxsrv",
+      "type": "backend",
+      "label": "LX200 server",
+      "sublabel": "ASCII, TCP :4030",
+      "pos": [
+        260,
+        175
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/lx200/server.py",
+          "line": 81,
+          "label": "Lx200Server"
+        }
+      ]
+    },
+    {
+      "id": "websrv",
+      "type": "backend",
+      "label": "Web server",
+      "sublabel": "HTTP + WS, :8765",
+      "pos": [
+        260,
+        310
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/webserver/server.py",
+          "line": 129,
+          "label": "WebServer"
+        }
+      ]
+    },
+    {
+      "id": "window",
+      "type": "frontend",
+      "label": "Desktop window",
+      "sublabel": "pywebview, React UI",
+      "pos": [
+        260,
+        430
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/main.py",
+          "line": 253,
+          "label": "create_window"
+        }
+      ]
+    },
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "Engine core",
+      "sublabel": "state, frame, pointing, target",
+      "pos": [
+        530,
+        175
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/engine/engine.py",
+          "line": 121,
+          "label": "Engine"
+        },
+        {
+          "path": "python/evf/engine/state.py",
+          "line": 71,
+          "label": "StateMachine"
+        }
+      ]
+    },
+    {
+      "id": "solver",
+      "type": "backend",
+      "label": "Solver thread",
+      "sublabel": "tetra3rs + Gaia DB",
+      "pos": [
+        800,
+        50
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/solver/thread.py",
+          "line": 39,
+          "label": "SolverThread"
+        }
+      ]
+    },
+    {
+      "id": "camclient",
+      "type": "backend",
+      "label": "Camera client",
+      "sublabel": "SubprocessManager + client",
+      "pos": [
+        800,
+        310
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "python/evf/camera/subprocess_mgr.py",
+          "line": 40,
+          "label": "SubprocessManager"
+        },
+        {
+          "path": "python/evf/camera/client.py",
+          "line": 55,
+          "label": "CameraClient"
+        }
+      ]
+    },
+    {
+      "id": "camserver",
+      "type": "backend",
+      "label": "Camera server",
+      "sublabel": "native, TCP :8764",
+      "pos": [
+        1060,
+        310
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "camera",
+      "type": "external",
+      "label": "USB camera",
+      "sublabel": "finder camera",
+      "pos": [
+        1060,
+        430
+      ],
+      "size": [
+        160,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Python process (python -m evf.main)",
+      "wraps": [
+        "stellsrv",
+        "lxsrv",
+        "websrv",
+        "window",
+        "engine",
+        "solver",
+        "camclient"
+      ],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-stellarium",
+      "from": "stellarium",
+      "to": "stellsrv",
+      "label": "position, GOTO"
+    },
+    {
+      "id": "c-lx200",
+      "from": "lxclients",
+      "to": "lxsrv",
+      "label": "LX200"
+    },
+    {
+      "id": "c-phone",
+      "from": "phone",
+      "to": "websrv",
+      "label": "HTTP + WS"
+    },
+    {
+      "id": "c-window",
+      "from": "window",
+      "to": "websrv",
+      "label": "localhost",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "c-stell-engine",
+      "from": "stellsrv",
+      "to": "engine",
+      "label": "J2000 pos, GOTO",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "top"
+    },
+    {
+      "id": "c-lx-engine",
+      "from": "lxsrv",
+      "to": "engine",
+      "label": "JNow pos, GOTO",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-web-engine",
+      "from": "websrv",
+      "to": "engine",
+      "label": "state, actions",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "bottom"
+    },
+    {
+      "id": "c-engine-solver",
+      "from": "engine",
+      "to": "solver",
+      "label": "latest frame",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c-camclient-engine",
+      "from": "camclient",
+      "to": "engine",
+      "label": "FRAME",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "c-cam-tcp",
+      "from": "camclient",
+      "to": "camserver",
+      "label": "TCP v1",
+      "variant": "emphasis"
+    },
+    {
+      "id": "c-cam-hw",
+      "from": "camserver",
+      "to": "camera",
+      "label": "drives",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        1140,
+        404
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "One process, three servers",
+      "items": [
+        "Stellarium, LX200 and web servers run in the engine process",
+        "LX200 :4030 also serves INDI and ASCOM clients",
+        "Stellarium server queries Stellarium's Remote Control API (localhost:8090) on client connect and after each GOTO, best effort",
+        "Bind: LX200 and web 0.0.0.0; Stellarium 127.0.0.1 (0.0.0.0 on a Pi). Web port 8765 by default (webserver.port)"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Latest frame only",
+      "items": [
+        "The camera client overwrites one LatestFrame; there is no frame queue",
+        "The solver thread never blocks the UI",
+        "The camera server is a separate process, so a camera crash cannot take the engine down"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Headless mode",
+      "items": [
+        "With --no-window the desktop window is not created",
+        "The phone browser then is the UI"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,279 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "Engine states and sync wizard",
+    "subtitle": "Reflects commit e921d73 (2026-11-19)",
+    "output": "engine-states.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1030,
+      624
+    ]
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "Sync wizard"
+    },
+    {
+      "id": "active",
+      "label": "Tracking and camera loss"
+    },
+    {
+      "id": "terminal",
+      "label": "Needs a camera retry"
+    }
+  ],
+  "states": [
+    {
+      "id": "setup",
+      "type": "start",
+      "label": "SETUP",
+      "sublabel": "initial, after stop",
+      "lane": "main",
+      "col": 0
+    },
+    {
+      "id": "sync",
+      "type": "active",
+      "label": "SYNC",
+      "sublabel": "frame solve",
+      "lane": "main",
+      "col": 1
+    },
+    {
+      "id": "syncconfirm",
+      "type": "waiting",
+      "label": "SYNC_CONFIRM",
+      "sublabel": "pick the star",
+      "lane": "main",
+      "col": 2
+    },
+    {
+      "id": "calibrate",
+      "type": "active",
+      "label": "CALIBRATE",
+      "sublabel": "finder rotation",
+      "lane": "main",
+      "col": 3
+    },
+    {
+      "id": "warmingup",
+      "type": "active",
+      "label": "WARMING_UP",
+      "sublabel": "solver running",
+      "lane": "main",
+      "col": 4
+    },
+    {
+      "id": "tracking",
+      "type": "active",
+      "label": "TRACKING",
+      "sublabel": "lost = 3+ failed solves",
+      "lane": "active",
+      "col": 2
+    },
+    {
+      "id": "reconnecting",
+      "type": "waiting",
+      "label": "RECONNECTING",
+      "sublabel": "5 attempts, 1 to 15 s",
+      "lane": "active",
+      "col": 0
+    },
+    {
+      "id": "error",
+      "type": "failure",
+      "label": "ERROR",
+      "sublabel": "retries exhausted",
+      "lane": "terminal",
+      "col": 0,
+      "yOffset": -14
+    }
+  ],
+  "transitions": [
+    {
+      "id": "t-begin",
+      "from": "setup",
+      "to": "sync",
+      "label": "begin sync",
+      "labelAt": [
+        171,
+        114
+      ]
+    },
+    {
+      "id": "t-solve",
+      "from": "sync",
+      "to": "syncconfirm",
+      "label": "solve ok",
+      "labelAt": [
+        325,
+        114
+      ]
+    },
+    {
+      "id": "t-confirm",
+      "from": "syncconfirm",
+      "to": "calibrate",
+      "label": "confirm star",
+      "labelAt": [
+        479,
+        114
+      ]
+    },
+    {
+      "id": "t-calibrated",
+      "from": "calibrate",
+      "to": "warmingup",
+      "label": "stable or skipped",
+      "labelAt": [
+        633,
+        114
+      ]
+    },
+    {
+      "id": "t-previous",
+      "from": "sync",
+      "to": "warmingup",
+      "label": "use previous calibration",
+      "route": "top-channel",
+      "channelY": 66,
+      "fromSide": "top",
+      "toSide": "top"
+    },
+    {
+      "id": "t-first",
+      "from": "warmingup",
+      "to": "tracking",
+      "label": "first valid solve",
+      "labelAt": [
+        710,
+        233
+      ]
+    },
+    {
+      "id": "t-lost-camera",
+      "from": "tracking",
+      "to": "reconnecting",
+      "label": "disconnect or stall",
+      "variant": "security",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "t-exhausted",
+      "from": "reconnecting",
+      "to": "error",
+      "label": "5 attempts failed",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        402,
+        385
+      ]
+    },
+    {
+      "id": "t-recovered",
+      "from": "reconnecting",
+      "to": "setup",
+      "label": "camera back",
+      "variant": "emphasis",
+      "fromSide": "left",
+      "toSide": "bottom",
+      "via": [
+        [
+          94,
+          307
+        ]
+      ]
+    },
+    {
+      "id": "t-retry",
+      "from": "error",
+      "to": "setup",
+      "label": "retry camera",
+      "variant": "emphasis",
+      "fromSide": "left",
+      "toSide": "left",
+      "via": [
+        [
+          20,
+          465
+        ],
+        [
+          20,
+          157
+        ]
+      ],
+      "labelAt": [
+        190,
+        479
+      ]
+    },
+    {
+      "id": "t-stop",
+      "from": "tracking",
+      "to": "setup",
+      "label": "stop tracking",
+      "fromSide": "right",
+      "toSide": "top",
+      "via": [
+        [
+          800,
+          307
+        ],
+        [
+          800,
+          34
+        ],
+        [
+          94,
+          34
+        ]
+      ],
+      "labelAt": [
+        450,
+        34
+      ]
+    },
+    {
+      "id": "t-sync-retry",
+      "from": "syncconfirm",
+      "to": "sync",
+      "label": "retry",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          402,
+          215
+        ],
+        [
+          248,
+          215
+        ]
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Wizard",
+      "items": [
+        "SYNC solves one frame (sync-solve thread)",
+        "Stop tracking also works from WARMING_UP"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Camera loss",
+      "items": [
+        "RECONNECTING starts from every state except ERROR and itself",
+        "Retry camera leaves RECONNECTING or ERROR for SETUP"
+      ]
+    }
+  ]
+}
