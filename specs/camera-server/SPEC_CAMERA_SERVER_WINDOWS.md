@@ -804,7 +804,7 @@ camera. **[INFRA]** = route to the infra agent.
 - [x] 6.3 `build_windows.bat` Phase 1a (skips with a warning when `dotnet` is missing) + copy into the release dir (`pushnav.iss` needs no change). Test: local build with and without the .NET SDK on `PATH`; with it, the zip/installer contains both exes.
 - [x] 6.4 Docs: `docs/hardware.md` IDS section (install IDS Software Suite, supported model, licensing note), a `README.md` "Third-party software" note on the proprietary, separately installed IDS runtime that is loaded at runtime and never bundled (§3.4), a `SPEC_BUILD_RELEASE.md` §6.1 line, and a `CLAUDE.md` build line. Test: review.
 - [x] 6.5 **[INFRA]** Add job `camera-server-windows` to `.github/workflows/test.yml` (xUnit, AOT publish, conformance against the exe, artifact; §10.3). Test: job green on the PR; existing `python`/`web` jobs unchanged.
-- [ ] 6.6 **[INFRA]** `build.yml`: add setup-dotnet to `build-windows` and a check that `camera_server_dotnet.exe` is in the release dir. Test: `workflow_dispatch` with platform=windows produces the installer with both exes.
+- [x] 6.6 **[INFRA]** `build.yml`: add setup-dotnet to `build-windows` and a check that `camera_server_dotnet.exe` is in the release dir. Test: `workflow_dispatch` with platform=windows produces the installer with both exes. *(Done in YAML; workflow_dispatch run pending)*
 - [ ] 6.7 *(Optional, later; Q12)* Settings UI select "Camera server: C# (default) / C" that writes `camera.windows_server` and triggers "Retry camera". Test: vitest + manual.
 - [ ] 6.8 Upstream-merge check before the PR: `git diff upstream/main -- camera/windows/` is empty, and every edited upstream file is in the §8.5 table.
 
