@@ -191,6 +191,9 @@ if defined CAMERA_DOTNET_BIN copy /y "%CAMERA_DOTNET_BIN%" "%APP_DIR%\camera_ser
 
 REM Copy data resources
 copy /y "%REPO_ROOT%\data\tetra3rs_gaia.bin" "%APP_DIR%\data\"
+REM fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+copy /y "%REPO_ROOT%\data\tetra3rs_gaia_wide.bin" "%APP_DIR%\data\"
+copy /y "%REPO_ROOT%\data\solver_dbs.json" "%APP_DIR%\data\"
 copy /y "%REPO_ROOT%\data\VERSION.json" "%APP_DIR%\data\"
 xcopy /s /e /q /y "%REPO_ROOT%\data\sounds" "%APP_DIR%\data\sounds\"
 
