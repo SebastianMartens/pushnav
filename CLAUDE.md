@@ -56,6 +56,9 @@ finds no supported camera (exit code 3) or when `camera.windows_server` / the
 `specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md`). IDS cameras need the IDS Software
 Suite installed separately; PushNav never bundles it. Dev only: `PUSHNAV_CAMERA_SERVER_ARGS`
 passes extra arguments to the C# server, e.g. `--backend fake --fake-images tests/samples`.
+Windows dev shortcut (fork): `run-windows.bat` in the repo root rebuilds whatever is out of date
+(web UI, C# and C camera servers) and starts the app; `-Check` only reports, `-Fake` uses the
+fake camera, `-Rebuild` forces a full rebuild.
 
 ### Platform-specific app builds
 
