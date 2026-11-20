@@ -1,7 +1,7 @@
 # SPEC_CAMERA_SERVER_WINDOWS.md — PushNav
 
 Version: 1.3 (2026-11-18: status after PRs #9, #10, #14; task 7 (v2) detailed and scheduled in `SPEC_CAMERA_CONTROLS.md` §10.8; Q2, Q5 resolved. 1.2: C server kept permanently side by side, server selection, upstream minimal-diff rules; 1.1: 25 mm reference lens, wide-field solver database)
-Status: Approved (PR #8). Tasks 1–6 mostly implemented (PRs #9, #10, #14, #15; open: 5.6, 5.9, 6.6–6.8; 6.2a not planned); task 7 (protocol v2) open; task 8 (UVC) not planned
+Status: Approved (PR #8). Tasks 1–6 mostly implemented (PRs #9, #10, #14, #15; open: 5.6, 5.9, 6.7, 6.8; 6.6 done in YAML (S1a), run pending; 6.2a not planned); task 7 (protocol v2) open; task 8 (UVC) not planned
 Date: 2026-11-18
 Target: Windows 10/11 x64
 Issue: SebastianMartens/pushnav#1 (IDS uEye UI-306xCP-M support)
