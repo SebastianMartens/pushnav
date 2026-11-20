@@ -68,7 +68,7 @@
     },
     {
       "id": "tracking",
-      "type": "success",
+      "type": "active",
       "label": "TRACKING",
       "sublabel": "lost = 3+ failed solves",
       "lane": "active",

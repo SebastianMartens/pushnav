@@ -366,7 +366,8 @@
       "items": [
         "The C server stays unmodified next to the C# server",
         "The UVC backend is not registered in the C# server today",
-        "SubprocessManager is upstream code with small \"# fork:\" hooks into server_select"
+        "SubprocessManager is upstream code with small \"# fork:\" hooks into server_select",
+        "Extra allowlist entries: PUSHNAV_CAMERA_IDS or camera.extra_camera_ids"
       ]
     }
   ]

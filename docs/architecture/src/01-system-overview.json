@@ -357,8 +357,8 @@
       "items": [
         "Stellarium, LX200 and web servers run in the engine process",
         "LX200 :4030 also serves INDI and ASCOM clients",
-        "Stellarium server also polls Stellarium's Remote Control API on localhost:8090",
-        "Bind: LX200 and web 0.0.0.0; Stellarium 127.0.0.1 (0.0.0.0 on a Pi)"
+        "Stellarium server queries Stellarium's Remote Control API (localhost:8090) on client connect and after each GOTO, best effort",
+        "Bind: LX200 and web 0.0.0.0; Stellarium 127.0.0.1 (0.0.0.0 on a Pi). Web port 8765 by default (webserver.port)"
       ]
     },
     {

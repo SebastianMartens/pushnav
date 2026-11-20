@@ -117,7 +117,7 @@
       "from": "client",
       "to": "server",
       "y": 396,
-      "label": "GET_CONTROLS",
+      "label": "GET_CONTROLS (supported, unused by the engine)",
       "variant": "default"
     },
     {
@@ -131,7 +131,7 @@
       "from": "server",
       "to": "client",
       "y": 452,
-      "label": "ERROR (UTF-8 text); if fatal, close + exit(1)",
+      "label": "ERROR (C# server only), then close + exit(1)",
       "variant": "dashed"
     },
     {

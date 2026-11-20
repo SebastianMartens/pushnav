@@ -327,7 +327,7 @@
       "title": "Pi extras",
       "items": [
         "The hotspot comes from the ready-made SD card user-data, not the .deb",
-        "led.enabled in config.json turns the LEDs off"
+        "led.enabled: false in config.json turns the LEDs off"
       ]
     }
   ]

@@ -5574,8 +5574,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <ul>
           <li>&bull; Stellarium, LX200 and web servers run in the engine process</li>
           <li>&bull; LX200 :4030 also serves INDI and ASCOM clients</li>
-          <li>&bull; Stellarium server also polls Stellarium&#39;s Remote Control API on localhost:8090</li>
-          <li>&bull; Bind: LX200 and web 0.0.0.0; Stellarium 127.0.0.1 (0.0.0.0 on a Pi)</li>
+          <li>&bull; Stellarium server queries Stellarium&#39;s Remote Control API (localhost:8090) on client connect and after each GOTO, best effort</li>
+          <li>&bull; Bind: LX200 and web 0.0.0.0; Stellarium 127.0.0.1 (0.0.0.0 on a Pi). Web port 8765 by default (webserver.port)</li>
         </ul>
       </div>
 
