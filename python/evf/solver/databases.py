@@ -44,6 +44,16 @@ _FALLBACK_NARROW_NAME = "narrow"
 _FALLBACK_NARROW_RANGE = (7.0, 10.0)
 
 
+class NarrowDatabaseMissing(FileNotFoundError):
+    """The registry lists the narrow database but its file is missing.
+
+    The narrow database is the base every install has had since the first
+    release, so this fails loudly (like a missing tetra3rs_gaia.bin always
+    did: the engine logs "Failed to load tetra3rs database" and runs without
+    a solver) instead of quietly solving with the wide database.
+    """
+
+
 @dataclass(frozen=True)
 class DbInfo:
     """One entry of the solver-database registry."""
@@ -82,6 +92,9 @@ def load_registry(db_dir: Path | None = None) -> list[DbInfo]:
     missing, unreadable or yields no usable entry, the narrow database at
     ``tetra3rs_database_path()`` is returned as the only entry.
     Result is sorted narrowest range first.
+
+    Raises :class:`NarrowDatabaseMissing` if the entry named ``narrow`` is
+    listed but its file is missing.
     """
     directory = Path(db_dir) if db_dir is not None else solver_db_dir()
     reg_path = directory / REGISTRY_FILENAME
@@ -93,6 +106,9 @@ def load_registry(db_dir: Path | None = None) -> list[DbInfo]:
             info = _parse_entry(directory, entry)
             if info is not None:
                 infos.append(info)
+    except NarrowDatabaseMissing as exc:
+        logger.error("%s", exc)
+        raise
     except FileNotFoundError:
         logger.warning("Solver registry %s not found; using the narrow database only", reg_path)
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -112,6 +128,8 @@ def _parse_entry(directory: Path, entry: dict[str, Any]) -> DbInfo | None:
         return None
     path = directory / filename
     if not path.is_file():
+        if name == _FALLBACK_NARROW_NAME:
+            raise NarrowDatabaseMissing(f"Solver database {name!r} is listed but {path} is missing")
         logger.warning("Solver database %r is listed but %s is missing; skipping", name, path)
         return None
     lo, hi = float(entry["min_fov_deg"]), float(entry["max_fov_deg"])
@@ -165,11 +183,15 @@ class SolverDatabases:
         self._registry = sorted(registry, key=lambda i: (i.width_deg, i.name))
         self._loader = loader
         self._lock = threading.Lock()
-        self._pending: DbInfo | None = None
         selection = select_database(self._registry, initial_fov_deg)
-        self._selection = selection
         self._active = selection.info
         self._db = self._load(selection.info)
+        # What the last request asked for. A swap is due whenever _wanted
+        # differs from _active, so a request that arrives while a load is
+        # running is never lost: the next apply_pending() sees it.
+        self._wanted = selection.info
+        self._fov_deg = initial_fov_deg
+        self._failed: DbInfo | None = None  # target whose load failed (no retry loop)
 
     # -- read side ------------------------------------------------------------
 
@@ -190,9 +212,13 @@ class SolverDatabases:
 
     @property
     def in_range(self) -> bool:
-        """False while the active database does not contain the requested FOV."""
+        """False while the active database does not contain the requested FOV.
+
+        Derived from the database actually loaded, so it stays truthful after
+        a failed load or while a swap is still due.
+        """
         with self._lock:
-            return self._selection.in_range
+            return self._active.distance_to(self._fov_deg) == 0.0
 
     def select(self, fov_deg: float) -> DbSelection:
         return select_database(self._registry, fov_deg)
@@ -203,13 +229,16 @@ class SolverDatabases:
         """Ask for the database that fits ``fov_deg``; any thread.
 
         Nothing is loaded here. If it differs from the active one, the swap
-        happens in the next :meth:`apply_pending`. Returns the selection so
-        the caller can show the out-of-range hint.
+        happens in the next :meth:`apply_pending`. The last request always
+        wins, also when it arrives during a load. A new request retries a
+        target whose load failed. Returns the selection so the caller can
+        show the out-of-range hint.
         """
         selection = self.select(fov_deg)
         with self._lock:
-            self._selection = selection
-            self._pending = selection.info if selection.info != self._active else None
+            self._wanted = selection.info
+            self._fov_deg = fov_deg
+            self._failed = None
         if not selection.in_range:
             logger.warning(
                 "FOV %.2f deg is outside every solver database; using %r (%.1f..%.1f deg)",
@@ -223,18 +252,20 @@ class SolverDatabases:
 
         Returns True if the active database changed. A load failure keeps the
         old database (ERROR logged) and does not raise, so the solver thread
-        survives it.
+        survives it; the failed target is not retried until the next request.
         """
         with self._lock:
-            pending = self._pending
-            self._pending = None
-        if pending is None:
-            return False
+            pending = self._wanted
+            if pending == self._active or pending == self._failed:
+                return False
         try:
             new_db = self._load(pending)
         except Exception as exc:  # noqa: BLE001 - keep solving with the old db
             logger.error("Failed to load solver database %r from %s: %s",
                          pending.name, pending.path, exc)
+            with self._lock:
+                if self._wanted == pending:  # not if a newer request arrived meanwhile
+                    self._failed = pending
             return False
         with self._lock:
             old = self._active

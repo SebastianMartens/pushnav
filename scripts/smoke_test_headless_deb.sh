@@ -61,6 +61,8 @@ for _ in $(seq 1 60); do
 done
 echo "  /api/version: ${version:-<no response>}"
 grep -q "tetra3rs database loaded" /tmp/run.log || { echo "FAIL: star database not loaded"; tail -30 /tmp/run.log; exit 1; }
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md): loaded through the registry
+grep -q "tetra3rs_gaia.bin \[narrow\]" /tmp/run.log || { echo "FAIL: narrow database not loaded via solver_dbs.json"; tail -30 /tmp/run.log; exit 1; }
 if grep -q Traceback /tmp/run.log; then echo "FAIL: traceback in log"; tail -40 /tmp/run.log; exit 1; fi
 case "$version" in *'"app": "pushnav"'*) ;; *) echo "FAIL: /api/version"; tail -30 /tmp/run.log; exit 1 ;; esac
 EOF

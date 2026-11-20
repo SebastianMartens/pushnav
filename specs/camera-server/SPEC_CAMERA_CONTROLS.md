@@ -617,7 +617,10 @@ Under Camera, add:
 - pytest, wide database: no wide-field sky sample exists in
   `tests/samples` yet. Add one IDS frame (or a synthetic frame rendered
   from the Gaia catalog at 25.6° / 1936x1216) once available (task 6.3),
-  then assert it solves with the wide database and not with the narrow one.
+  then assert it solves with the wide database. Whether the narrow database
+  also solves it is not asserted: tetra3rs matches sub-patterns, so the narrow
+  database can solve a wide field too. The comparison is a Q7 measurement on
+  real frames.
 - pytest, paths: `solver_db_dir()` in dev, release and headless layouts.
 - pytest, web server: `image_w/h` and `fov_h_deg` follow the engine;
   `/api/control` float and enum validation (`tests/test_webserver_api.py`,
@@ -751,7 +754,7 @@ the 25 mm lens from solving, and it works over today's v1 session.
 **S2 FOV in the UI, learning and search.**
 - FOV learning and FOV search (`solver/fov.py`), `POST /api/camera/fov`, Settings fields (camera, FOV + source + database, focal length, reset, out-of-range hint), calibration tied to `calibration.camera_key`, overlay marker scaling, RSS numbers.
 - Files: `python/evf/{solver/fov.py, solver/thread.py, engine/engine.py, webserver/server.py, config/profiles.py}`, `web/src/lib/types.ts`, `web/src/components/settings/Settings.tsx`, `web/src/components/live-view/{NavOverlay,SyncCandidatesOverlay,StarOverlay}.tsx`, `web/src/components/wizard/Wizard.test.tsx`.
-- Test: pytest for learning (outliers, range guard, 10 % step), search (fake solver that solves on one database only), the FOV API, `has_calibration` across camera keys; the wide-field fixture from S1 solves with the wide database and not with the narrow one; vitest for the Settings fields, marker scaling and the 1936x1216 / 25.6° Wizard fixture.
+- Test: pytest for learning (outliers, range guard, 10 % step), search (fake solver that solves on one database only), the FOV API, `has_calibration` across camera keys; the wide-field fixture from S1 solves with the wide database (the comparison with the narrow database is a Q7 measurement on real frames, not a test assertion); vitest for the Settings fields, marker scaling and the 1936x1216 / 25.6° Wizard fixture.
 - **[HW]** Task 6.4 (fresh profile finds ~25.6° by search; with 25 mm entered no search). Task 4.11 on the laptop (no Pi, Q11).
 
 **S3 Protocol v2 in the engine, against the mock.**

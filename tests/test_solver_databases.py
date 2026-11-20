@@ -30,6 +30,7 @@ from evf.engine.pointing import PointingState
 from evf.engine.state import EngineState, StateMachine
 from evf.solver.databases import (
     DbInfo,
+    NarrowDatabaseMissing,
     SolverDatabases,
     load_registry,
     select_database,
@@ -167,6 +168,27 @@ class TestLoadRegistry:
             _entry("wide", "w.bin", 18, 32),  # no such file
         ], touch=False)
         assert [i.name for i in load_registry(tmp_path)] == ["narrow"]
+
+    def test_missing_narrow_file_fails_loudly(self, tmp_path, caplog):
+        """Only the wide file present: do not quietly select wide for 8.86 deg
+        (every solve would fail); raise like a missing tetra3rs_gaia.bin always
+        did, so the engine logs "Failed to load tetra3rs database"."""
+        (tmp_path / "w.bin").write_bytes(b"x")
+        _write_registry(tmp_path, [
+            _entry("narrow", "n.bin", 7, 10),  # file missing
+            _entry("wide", "w.bin", 18, 32),
+        ], touch=False)
+        with caplog.at_level("ERROR", logger="evf.solver.databases"):
+            with pytest.raises(NarrowDatabaseMissing):
+                load_registry(tmp_path)
+        assert "n.bin" in caplog.text
+
+    def test_missing_narrow_file_without_registry_fails_at_load(self, tmp_path):
+        """No registry: the fallback entry points at tetra3rs_gaia.bin; a real
+        load of a missing file raises as before."""
+        info = load_registry(tmp_path)[0]
+        with pytest.raises(Exception):
+            SolverDatabases([DbInfo(info.name, tmp_path / "nope.bin", 7.0, 10.0)], 8.86)
 
     def test_file_with_path_separator_is_skipped(self, tmp_path):
         sub = tmp_path / "sub"
@@ -317,6 +339,27 @@ class TestSolverDatabases:
         assert dbs.db.path == NARROW.path
         assert dbs.apply_pending() is False  # request was consumed, no retry loop
 
+    def test_failed_load_keeps_in_range_consistent_with_the_active_database(self):
+        loader = RecordingLoader()
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=loader)
+        loader.fail_for.add("wide")
+        dbs.request_for_fov(25.6)
+        dbs.apply_pending()
+        assert dbs.active.name == "narrow"
+        assert dbs.in_range is False  # narrow does not contain 25.6 deg: S1b shows the hint
+
+    def test_a_new_request_retries_a_failed_target(self):
+        loader = RecordingLoader()
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=loader)
+        loader.fail_for.add("wide")
+        dbs.request_for_fov(25.6)
+        dbs.apply_pending()
+        loader.fail_for.clear()
+        dbs.request_for_fov(25.6)
+        assert dbs.apply_pending() is True
+        assert dbs.active.name == "wide"
+        assert dbs.in_range is True
+
     def test_swap_runs_on_the_thread_calling_apply_pending(self):
         loader = RecordingLoader()
         dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=loader)
@@ -329,6 +372,118 @@ class TestSolverDatabases:
     def test_empty_registry_raises(self):
         with pytest.raises(ValueError):
             SolverDatabases([], 8.86, loader=RecordingLoader())
+
+
+class GatedLoader(RecordingLoader):
+    """Blocks the load of one database until released, to land a request mid-load."""
+
+    def __init__(self, gate_on: str) -> None:
+        super().__init__()
+        self.gate_on = gate_on
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, path: Path):
+        if path.stem == self.gate_on and not self.release.is_set():
+            self.started.set()
+            assert self.release.wait(10), "test never released the gate"
+        return super().__call__(path)
+
+
+class TestRequestDuringLoad:
+    def _start_swap(self, dbs, loader):
+        t = threading.Thread(target=dbs.apply_pending, name="solver-test")
+        t.start()
+        assert loader.started.wait(5)
+        return t
+
+    def test_request_mid_load_is_not_lost(self):
+        loader = GatedLoader("wide")
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=loader)
+        dbs.request_for_fov(25.6)
+        t = self._start_swap(dbs, loader)
+        dbs.request_for_fov(8.86)  # user changes back while wide is loading
+        loader.release.set()
+        t.join(5)
+        dbs.apply_pending()  # the solver thread's next loop iteration
+        assert dbs.active.name == "narrow"  # final state = last request
+        assert dbs.db.path == NARROW.path
+        assert dbs.in_range is True
+        assert dbs.apply_pending() is False
+        assert loader.live_count() == 1
+
+    def test_same_target_request_mid_load_does_not_load_twice(self):
+        loader = GatedLoader("wide")
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=loader)
+        dbs.request_for_fov(25.6)
+        t = self._start_swap(dbs, loader)
+        dbs.request_for_fov(26.0)  # still the wide database
+        loader.release.set()
+        t.join(5)
+        assert dbs.apply_pending() is False
+        assert dbs.active.name == "wide"
+        assert [c[0] for c in loader.calls].count("wide") == 1
+
+    def test_failed_load_does_not_block_a_newer_request(self):
+        loader = GatedLoader("wide")
+        loader.fail_for.add("wide")
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=loader)
+        dbs.request_for_fov(25.6)
+        t = self._start_swap(dbs, loader)
+        dbs.request_for_fov(8.86)
+        loader.release.set()
+        t.join(5)
+        assert dbs.active.name == "narrow"
+        assert dbs.in_range is True
+
+
+# ---------------------------------------------------------------------------
+# FOV arguments of the callers (today: legacy 8.86 deg / 1.5 deg, narrow db)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSolver:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self.called = threading.Event()
+
+    def apply_pending_database(self):
+        return False
+
+    def solve_frame(self, image_bytes, fov_estimate_deg, fov_max_error_deg):
+        self.calls.append((fov_estimate_deg, fov_max_error_deg))
+        self.called.set()
+        return {"RA": None, "Dec": None, "Roll": None, "Matches": 0, "Prob": None,
+                "all_centroids": [], "matched_centroids": [], "matched_stars": [],
+                "image_size": (720, 1280)}
+
+    is_valid = staticmethod(PlateSolver.is_valid)
+
+
+class TestCallerFovArguments:
+    def test_engine_sync_solve_passes_the_legacy_fov(self, tmp_path):
+        from evf.engine.engine import Engine
+
+        eng = Engine(dev_mode=False, config=ConfigManager(config_dir=tmp_path))
+        eng._solver = _RecordingSolver()
+        eng._frame_buffer.set(b"frame", time.monotonic(), 1)
+        eng._sync_lock.acquire()  # _perform_sync_solve releases it
+        eng._perform_sync_solve()
+        assert eng._solver.calls == [(8.86, 1.5)]
+
+    def test_solver_thread_passes_the_legacy_fov(self, tmp_path):
+        stub = _RecordingSolver()
+        fb, sm = LatestFrame(), StateMachine()
+        fb.set(b"frame", time.monotonic(), 1)
+        st = SolverThread(stub, fb, PointingState(), sm, ConfigManager(config_dir=tmp_path))
+        sm.transition(EngineState.SYNC)
+        sm.transition(EngineState.SYNC_CONFIRM)
+        st.start()
+        try:
+            assert stub.called.wait(5)
+        finally:
+            st.stop()
+        assert stub.calls[0] == (8.86, 1.5)
 
 
 # ---------------------------------------------------------------------------
