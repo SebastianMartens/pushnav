@@ -8,6 +8,7 @@ import os
 import platform
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,7 @@ except FileNotFoundError as exc:  # repo checkout without a built camera_server
     camera = str(exc)
 print(json.dumps({
     "db": str(paths.tetra3rs_database_path()),
+    "solver_dbs": str(paths.solver_db_dir()),  # fork: camera-controls
     "version": str(paths.version_json()),
     "sounds": str(paths.sounds_dir()),
     "title": str(paths.title_image()),
@@ -52,6 +54,7 @@ def test_pushnav_root_uses_release_layout(tmp_path):
     p = _resolve(str(root))
     assert p == {
         "db": str(root / "data" / "tetra3rs_gaia.bin"),
+        "solver_dbs": str(root / "data"),  # fork: camera-controls
         "version": str(root / "data" / "VERSION.json"),
         "sounds": str(root / "data" / "sounds"),
         "title": str(root / "marketing" / "inapp-title.png"),
@@ -65,3 +68,6 @@ def test_without_pushnav_root_stays_in_repo(tmp_path):
     p = _resolve(None)
     assert "camera/linux/camera_server" in p["camera"]
     assert p["web"].endswith("web/dist")
+    # fork: camera-controls: dev layout keeps both databases and solver_dbs.json in data/
+    assert p["solver_dbs"].endswith("data")
+    assert p["db"] == str(Path(p["solver_dbs"]) / "tetra3rs_gaia.bin")

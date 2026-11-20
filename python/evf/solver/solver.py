@@ -35,11 +35,11 @@ import numpy as np
 import tetra3rs
 from PIL import Image
 
-from evf.paths import tetra3rs_database_path
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+from evf.solver.databases import DbInfo, SolverDatabases, load_registry
+from evf.solver.fov import LEGACY_FOV_DEG
 
 logger = logging.getLogger(__name__)
-
-_DATABASE_PATH = tetra3rs_database_path()
 
 # Centroid extraction parameters — see the bench-findings doc for why
 # matched_filter_sigma=2.0 is load-bearing (without it, M42 nebulosity
@@ -51,25 +51,51 @@ _CENTROID_PARAMS = dict(
     matched_filter_sigma=2.0,
 )
 
-_FOV_DEG = 8.86
-_FOV_MAX_ERROR_DEG = 1.5
 
-
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
 class PlateSolver:
-    """Load tetra3rs database once and solve frames on demand."""
+    """Load a tetra3rs database and solve frames on demand.
 
-    def __init__(self, database_path: Path | None = None) -> None:
-        db_path = database_path or _DATABASE_PATH
-        t0 = time.monotonic()
-        self._db = tetra3rs.SolverDatabase.load_from_file(str(db_path))
-        elapsed = time.monotonic() - t0
-        logger.info(
-            "tetra3rs database loaded in %.2fs: %s (%d stars, %d patterns)",
-            elapsed, db_path, self._db.num_stars, self._db.num_patterns,
-        )
+    Which database is loaded comes from the registry in ``solver_dbs.json``
+    (``evf.solver.databases``). Only one is loaded at a time; the engine
+    starts with the one for the legacy 8.86 deg FOV (narrow). A swap is
+    requested through ``databases`` and done by ``apply_pending_database()``
+    on the solver thread.
+    """
 
-    def solve_frame(self, image_bytes: bytes) -> dict:
+    def __init__(
+        self,
+        database_path: Path | None = None,
+        databases: SolverDatabases | None = None,
+    ) -> None:
+        if databases is not None:
+            self._databases = databases
+        elif database_path is not None:
+            # Explicit file (tests, tools): a registry of one, valid for any FOV.
+            info = DbInfo(Path(database_path).stem, Path(database_path), 0.1, 180.0)
+            self._databases = SolverDatabases([info], LEGACY_FOV_DEG)
+        else:
+            self._databases = SolverDatabases(load_registry(), LEGACY_FOV_DEG)
+
+    @property
+    def databases(self) -> SolverDatabases:
+        return self._databases
+
+    def apply_pending_database(self) -> bool:
+        """Swap to a requested database. Call on the solver thread between solves."""
+        return self._databases.apply_pending()
+
+    def solve_frame(
+        self,
+        image_bytes: bytes,
+        fov_estimate_deg: float,
+        fov_max_error_deg: float,
+    ) -> dict:
         """Solve a single image frame. Returns a tetra3-compatible result dict.
+
+        ``fov_estimate_deg`` / ``fov_max_error_deg`` are the horizontal FOV
+        guess and its tolerance (legacy setup: 8.86 / 1.5, see
+        ``evf.solver.fov``).
 
         Keys returned (preserving the legacy contract):
           RA, Dec, Roll          — degrees, J2000
@@ -96,11 +122,12 @@ class PlateSolver:
 
         all_centroids = self._centroids_list_to_yx(extraction.centroids, h, w)
 
+        db = self._databases.db  # one handle for the whole solve, even across a swap
         t0 = time.monotonic()
-        result = self._db.solve_from_centroids(
+        result = db.solve_from_centroids(
             extraction.centroids,
-            fov_estimate_deg=_FOV_DEG,
-            fov_max_error_deg=_FOV_MAX_ERROR_DEG,
+            fov_estimate_deg=fov_estimate_deg,
+            fov_max_error_deg=fov_max_error_deg,
             image_shape=(h, w),
         )
         t_solve_ms = (time.monotonic() - t0) * 1000
@@ -134,7 +161,7 @@ class PlateSolver:
         matched_centroids = self._indices_to_yx(
             result.matched_centroids, extraction.centroids, h, w
         )
-        matched_stars = self._catalog_ids_to_radec_mag(result.matched_catalog_ids)
+        matched_stars = self._catalog_ids_to_radec_mag(db, result.matched_catalog_ids)
 
         out.update({
             "RA": result.ra_deg,
@@ -166,7 +193,7 @@ class PlateSolver:
             out.append([float(c.y + cy), float(c.x + cx)])
         return out
 
-    def _catalog_ids_to_radec_mag(self, ids) -> list:
+    def _catalog_ids_to_radec_mag(self, db, ids) -> list:
         """Build the legacy [[ra_deg, dec_deg, mag], ...] list from
         tetra3rs Gaia source IDs via db.get_star_by_id().
 
@@ -175,7 +202,7 @@ class PlateSolver:
         """
         out = []
         for sid in ids:
-            star = self._db.get_star_by_id(sid)
+            star = db.get_star_by_id(sid)
             out.append([float(star.ra_deg), float(star.dec_deg), float(star.magnitude)])
         return out
 

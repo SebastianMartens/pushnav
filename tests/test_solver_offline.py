@@ -37,6 +37,11 @@ from evf.solver.thread import SolverThread
 
 _SAMPLES_DIR = Path(__file__).parent / "samples"
 
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+# solve_frame takes the FOV explicitly; the samples are the legacy 8.86 deg setup.
+_FOV_DEG = 8.86
+_FOV_MAX_ERROR_DEG = 1.5
+
 # solver fixture is provided by conftest.py (session-scoped)
 
 
@@ -58,7 +63,7 @@ class TestOfflineSolve:
     def test_solve_image(self, solver, image_name, expected_ra, expected_dec):
         """Solve sample image and verify RA/Dec within 2 degrees."""
         image_bytes = (_SAMPLES_DIR / image_name).read_bytes()
-        result = solver.solve_frame(image_bytes)
+        result = solver.solve_frame(image_bytes, _FOV_DEG, _FOV_MAX_ERROR_DEG)
 
         assert result["RA"] is not None, f"{image_name}: solve failed"
         assert abs(result["RA"] - expected_ra) < 2, f"{image_name}: RA off"
@@ -94,7 +99,7 @@ class TestRollRegression:
     )
     def test_roll_sign(self, solver, image_name, expected_roll):
         image_bytes = (_SAMPLES_DIR / image_name).read_bytes()
-        result = solver.solve_frame(image_bytes)
+        result = solver.solve_frame(image_bytes, _FOV_DEG, _FOV_MAX_ERROR_DEG)
         assert result["Roll"] is not None
         diff = abs(((result["Roll"] - expected_roll) + 180) % 360 - 180)
         assert diff < 5.0, (
@@ -126,7 +131,7 @@ class TestSampleInjectionSolves:
         from evf.engine.sample_injector import load_sample_jpeg
 
         jpeg = load_sample_jpeg(_SAMPLES_DIR, name)
-        result = solver.solve_frame(jpeg)
+        result = solver.solve_frame(jpeg, _FOV_DEG, _FOV_MAX_ERROR_DEG)
         assert result["RA"] is not None, (
             f"{name}: solve_frame returned no RA after PNG→JPEG re-encode. "
             f"The sample injector quality may have regressed below the "
