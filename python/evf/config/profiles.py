@@ -113,3 +113,20 @@ def last_camera_key(config: ConfigManager) -> str | None:
 
 def set_last_camera_key(config: ConfigManager, key: str | None) -> None:
     config.set(_SECTION, "last_camera_key", key)
+
+
+def claim_legacy_calibration(config: ConfigManager, key: str) -> bool:
+    """Tie a calibration made before profiles existed to the camera that connects.
+
+    ``calibration.camera_key`` is None for a calibration saved by an earlier
+    version. The camera the user has been using is the one connecting now, so it
+    gets the calibration; a camera that connects later does not (spec 4.2).
+    Returns True if the key was written.
+    """
+    if config.get("calibration", "sync_d_body") is None:
+        return False
+    if config.get("calibration", "camera_key") is not None:
+        return False
+    config.set("calibration", "camera_key", key)
+    logger.info("Existing calibration belongs to camera %r", key)
+    return True

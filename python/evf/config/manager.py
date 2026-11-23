@@ -39,7 +39,9 @@ DEFAULT_CONFIG = {
         # keep their values and pick these up through _merge_defaults.
         "max_exposure_us": 4000000, "last_camera_key": None, "profiles": {},
     },
-    "calibration": {"finder_rotation": 0.0, "sync_d_body": None},
+    # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md section 4.2)
+    # camera_key: the camera the calibration was made with (None: unknown / from before profiles).
+    "calibration": {"finder_rotation": 0.0, "sync_d_body": None, "camera_key": None},
     "logging": {"verbose": False},
     "audio": {"enabled": True},
     # Headless Pi status LED (see evf/engine/status_led.py).
@@ -74,6 +76,9 @@ class ConfigManager:
         self._path = self._dir / "config.json"
         self._data: dict = {}
         self._dirty = False
+        # fork: camera-controls: profile key of the connected camera, set by the engine
+        # (evf.engine.camera_profile). None: no camera, or one that cannot be identified.
+        self.active_camera_key: str | None = None
         self._load()
 
     # -- persistence ----------------------------------------------------------
@@ -190,11 +195,23 @@ class ConfigManager:
     @sync_d_body.setter
     def sync_d_body(self, value: list[float] | None) -> None:
         self.set("calibration", "sync_d_body", value)
+        # fork: camera-controls: a new sync belongs to the camera it was made with
+        if value is not None:
+            self.set("calibration", "camera_key", self.active_camera_key)
 
     @property
     def has_calibration(self) -> bool:
-        """True if both sync_d_body and finder_rotation have been saved."""
-        return self.sync_d_body is not None
+        """True if both sync_d_body and finder_rotation have been saved.
+
+        fork: camera-controls (spec 4.2): and they belong to the connected camera.
+        A calibration from another camera is kept in the file but does not count,
+        so the user syncs again. Unknown on either side (no camera key stored, no
+        camera connected) counts as a match.
+        """
+        if self.sync_d_body is None:
+            return False
+        saved_key = self.get("calibration", "camera_key")
+        return saved_key is None or self.active_camera_key is None or saved_key == self.active_camera_key
 
     @property
     def audio_enabled(self) -> bool:

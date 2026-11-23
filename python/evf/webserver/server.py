@@ -104,7 +104,8 @@ def _compute_origin(
     (spec 5.6); the defaults are the legacy 8.86 deg / 1280x720.
     """
     cx, cy = img_w / 2.0, img_h / 2.0
-    d_body = config.sync_d_body
+    # fork: camera-controls: a calibration from another camera does not apply (spec 4.2)
+    d_body = config.sync_d_body if config.has_calibration else None
     if d_body is not None and d_body[2] > 0.1:
         scale = img_w / (2.0 * math.tan(math.radians(fov_h / 2.0)))
         cx += (-d_body[0] / d_body[2]) * scale

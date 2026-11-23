@@ -103,12 +103,14 @@ class CameraProfile:
         self._geometry.connect(hello)
         key = profiles.camera_key_from_hello(hello)
         self._active_key = key
+        self._config.active_camera_key = key  # has_calibration compares with calibration.camera_key
         if key is None:
             logger.warning("Camera HELLO has no camera_key, backend or camera_model; using the default FOV")
             resolved = DEFAULT_RESOLVED_FOV
         else:
             profiles.ensure_profile(self._config, key)
             profiles.set_last_camera_key(self._config, key)
+            profiles.claim_legacy_calibration(self._config, key)
             resolved = resolve_fov(*profiles.get_fov(self._config, key))
         self._apply(resolved)
         logger.info("Camera profile %r: FOV %.2f deg (%s)", key, resolved.fov_h_deg, resolved.source)
