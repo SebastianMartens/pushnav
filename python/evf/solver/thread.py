@@ -100,6 +100,12 @@ class SolverThread:
             self._thread = None
 
     @property
+    def running(self) -> bool:  # fork: camera-controls
+        """True while the solver loop thread is alive."""
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    @property
     def consecutive_failures(self) -> int:
         with self._lock:
             return self._consecutive_failures

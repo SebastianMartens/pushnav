@@ -16,6 +16,7 @@ import json
 import logging
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -539,14 +540,27 @@ class TestEngineHooks:
         assert eng._camera_profile.params.get().fov_estimate_deg == 25.6
         assert eng._camera_profile.geometry_payload()["solver_db"] == "wide"
 
-    def test_camera_connect_hook_swaps_the_requested_database(self, tmp_path):
+    def test_camera_connect_hook_loads_the_database_when_no_solver_thread_runs(self, tmp_path):
         cfg = ConfigManager(config_dir=tmp_path)
         profiles.set_fov(cfg, IDS_KEY, 25.6, "user")
         eng = Engine(config=cfg)
         eng.startup_solver()
         assert eng._solver.databases.active.name == "narrow"  # no last camera yet
         eng._fork_camera_connected(IDS_HELLO)
-        assert eng._solver.apply_pending_database() is True  # what the solver thread does
+        # No solver thread: the engine swaps at once, so the UI never shows the
+        # "no database covers this FOV" hint for a database that is merely not loaded yet.
+        assert eng._solver.databases.active.name == "wide"
+        assert eng._camera_profile.geometry_payload()["fov_out_of_range"] is False
+
+    def test_camera_connect_hook_leaves_the_swap_to_a_running_solver_thread(self, tmp_path):
+        cfg = ConfigManager(config_dir=tmp_path)
+        profiles.set_fov(cfg, IDS_KEY, 25.6, "user")
+        eng = Engine(config=cfg)
+        eng._solver = _FakeSolver()
+        eng._solver_thread = types.SimpleNamespace(running=True)
+        eng._fork_camera_connected(IDS_HELLO)
+        assert eng._solver.databases.active.name == "narrow"  # the solver thread's apply_pending does it
+        assert eng._solver.apply_pending_database() is True
         assert eng._solver.databases.active.name == "wide"
 
     def test_a_failing_profile_hook_does_not_break_the_camera(self, tmp_path, caplog):
@@ -565,7 +579,9 @@ class TestEngineHooks:
         profiles.set_fov(cfg, IDS_KEY, 25.6, "user")
         eng = Engine(config=cfg)
         eng._solver = _EngineSolver()
+        eng._solver_thread = types.SimpleNamespace(running=True)  # so the connect hook leaves the swap pending
         eng._fork_camera_connected(IDS_HELLO)
+        assert eng._solver.databases.active.name == "narrow"
         eng._frame_buffer.set(b"frame", time.monotonic(), 1)
         eng._sync_lock.acquire()  # _perform_sync_solve releases it
         eng._perform_sync_solve()
@@ -593,3 +609,21 @@ class TestEngineHooks:
         monkeypatch.setattr("evf.engine.engine.SubprocessManager", _Boom)
         eng.startup_camera()
         assert eng._camera_profile.geometry.get() == DEFAULT_GEOMETRY
+
+
+class TestSolverThreadRunning:
+    def test_running_follows_the_thread(self, tmp_path):
+        stub = _RecordingSolver()
+        fb, sm = LatestFrame(), StateMachine()
+        st = SolverThread(stub, fb, PointingState(), sm, ConfigManager(config_dir=tmp_path))
+        assert st.running is False
+        fb.set(b"frame", time.monotonic(), 1)
+        sm.transition(EngineState.SYNC)
+        sm.transition(EngineState.SYNC_CONFIRM)
+        st.start()
+        try:
+            assert stub.called.wait(5)
+            assert st.running is True
+        finally:
+            st.stop()
+        assert st.running is False

@@ -1043,6 +1043,11 @@ class Engine:
         """
         try:
             self._camera_profile.on_camera_connected(hello)
+            # With no solver thread running, nothing else would load a database
+            # that fits the new FOV before the user starts tracking; the swap takes
+            # ~0.15 s and no solve is in progress. A running thread does it itself.
+            if self._solver is not None and not (self._solver_thread and self._solver_thread.running):
+                self._solver.apply_pending_database()
         except Exception as exc:
             logger.error("Could not activate the camera profile: %s", exc)
 
