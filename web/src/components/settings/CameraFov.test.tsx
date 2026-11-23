@@ -93,12 +93,25 @@ describe("CameraFov", () => {
     expect(setCameraFov).not.toHaveBeenCalled();
   });
 
-  it("lets the user turn a learned value into a user value by entering the pre-filled focal length", () => {
+  it("lets the user turn a learned value into a user value by typing the pre-filled focal length", () => {
     render(<CameraFov state={makeState({ fov_source: "learned" })} />);
     const input = screen.getByLabelText(/focal length/i);
     expect(input).toHaveValue(25);
-    fireEvent.blur(input); // unchanged, but the source is "learned"
+    fireEvent.change(input, { target: { value: "26" } });
+    fireEvent.change(input, { target: { value: "25" } }); // the same number again, typed
+    fireEvent.blur(input);
     expect(setCameraFov).toHaveBeenCalledWith({ focal_length_mm: 25 });
+  });
+
+  it("sends nothing when the field is left without an edit, whatever the source", () => {
+    for (const source of ["learned", "user", "default"] as const) {
+      const { unmount } = render(<CameraFov state={makeState({ fov_source: source })} />);
+      const input = screen.getByLabelText(/focal length/i);
+      fireEvent.focus(input);
+      fireEvent.blur(input);
+      unmount();
+    }
+    expect(setCameraFov).not.toHaveBeenCalled();
   });
 
   it("keeps an edit in progress when the search ends and the focal length fills in", () => {

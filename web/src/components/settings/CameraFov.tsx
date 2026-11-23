@@ -39,9 +39,12 @@ export function CameraFov({ state }: Props) {
   }
 
   function commitFocalLength(raw: string) {
+    // Only what the user typed counts: tapping into the field and away must not turn a learned FOV
+    // into a user value (the pre-filled focal length is rounded, so it would also move the FOV).
+    if (draft === null) return;
     const value = Number(raw);
     if (raw.trim() === "" || !Number.isFinite(value)) return; // empty: nothing to send
-    // The pre-filled value of a learned FOV is the user's to confirm: entering it makes it a user value.
+    // Typing the pre-filled value of a learned FOV again confirms it as a user value.
     if (value === cam.focal_length_mm && state.fov_source === "user") return; // unchanged
     run({ focal_length_mm: value });
   }

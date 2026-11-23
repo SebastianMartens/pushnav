@@ -502,7 +502,7 @@ Decisions where the text above is silent (S2; `solver/fov_search.py`, `engine/ca
   outside the profile lock and retried on the next frame after a failed load, `release_extras()` when it ends or the
   camera goes away), so alternating frames never reloads a 50 MB file. While held, a swap takes the new database from
   the held ones and keeps the old active one instead of dropping it, so each file is loaded once; at the end of the
-  search the database the pending swap wants is kept for that swap (no second load). Each
+  search the database the pending swap wants is kept for that swap (no second load) until a later request points elsewhere. A search that ends or is replaced while a database loads does not keep what it loaded (unless the swap wants it) and does not disarm the next search; the holding is re-checked on every search frame. Each
   step is `(database, centre FOV, half the range)`; `PlateSolver.solve_frame(..., database=info)` solves against
   that entry.
 - **The wizard works during the search.** The sync solve (state SYNC, no solver thread) tries each database in
@@ -619,8 +619,8 @@ Under Camera, add:
 The focal-length field needs the sensor size, so it is disabled for a camera that does not report one (every
 upstream server). **Decided by Sebastian (2026-11-23):** no field for the FOV in degrees in Settings for those
 cameras; `POST /api/camera/fov` keeps accepting `fov_h_deg` (and `config.json` can be edited by hand,
-`docs/hardware.md`). A learned FOV's focal length is pre-filled; entering it (also unchanged) turns it into a user
-value. A value being typed is kept while the engine's state changes.
+`docs/hardware.md`). A learned FOV's focal length is pre-filled; typing it (also unchanged) turns it into a user
+value, but leaving the field without typing sends nothing. A value being typed is kept while the engine's state changes.
 
 ---
 

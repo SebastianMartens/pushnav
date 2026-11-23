@@ -98,7 +98,6 @@ class CameraProfile:
         self._lock = threading.RLock()
         self._learner = FovLearner()
         self._search: FovSearch | None = None
-        self._search_loaded = False  # hold_all() tried for the current search
         self._hello: dict | None = None
         self._sensor_mm: float | None = None
 
@@ -210,7 +209,6 @@ class CameraProfile:
         if databases is None or len(databases.registry) < 2:
             return
         self._search = FovSearch(databases.registry, guess_fov_from_sensor(self._sensor_mm))
-        self._search_loaded = False
         logger.info("Profile %r has no FOV: searching with %s", self._active_key,
                     " and ".join(i.name for i in self._search.order))
 
@@ -226,16 +224,15 @@ class CameraProfile:
         """The search alternates between the databases, so it holds them all (spec 5.4.3).
 
         Called without ``self._lock``: a load takes up to 0.15 s and ``/ws`` reads
-        ``camera_info()`` under that lock. A failed load is retried on the next call.
+        ``camera_info()`` under that lock. Checked on every call (cheap), so a failed
+        load is retried and a new search after an old one re-arms the holding.
         """
-        if self._search_loaded:
+        if databases.holding and len(databases.loaded()) >= len(databases.registry):
             return
-        complete = databases.hold_all()
+        databases.hold_all()
         with self._lock:
-            if self._search is not search:  # the search ended while we loaded
+            if self._search is None:  # no search any more: do not keep what it loaded
                 databases.release_extras()
-            elif complete:
-                self._search_loaded = True
 
     def plan(self) -> SolvePlan:
         """What the solver thread solves next. Called once per frame on that thread."""

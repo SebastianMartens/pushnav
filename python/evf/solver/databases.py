@@ -271,6 +271,12 @@ class SolverDatabases:
                 return self._db
             return self._extras.get(info.name)
 
+    @property
+    def holding(self) -> bool:
+        """True from ``hold_all()`` until ``release_extras()`` (a FOV search is running)."""
+        with self._lock:
+            return self._holding
+
     def loaded(self) -> list[DbInfo]:
         """The databases whose handle is in memory, narrowest range first."""
         with self._lock:
@@ -292,6 +298,8 @@ class SolverDatabases:
             self._wanted = selection.info
             self._fov_deg = fov_deg
             self._failed = None
+            if not self._holding:  # fork: a copy kept for an earlier swap must not outlive its use
+                self._drop_unwanted_extras_locked()
         if not selection.in_range:
             logger.warning(
                 "FOV %.2f deg is outside every solver database; using %r (%.1f..%.1f deg)",
@@ -362,6 +370,8 @@ class SolverDatabases:
         for info in self._registry:
             with self._load_lock:
                 with self._lock:
+                    if not self._holding:  # the search ended while we queued: load nothing more
+                        return False
                     if info == self._active or info.name in self._extras:
                         continue
                 try:
@@ -371,7 +381,12 @@ class SolverDatabases:
                     complete = False
                     continue
                 with self._lock:
+                    # ... or while we loaded: keep it only if a pending swap wants it
+                    if not self._holding and info != self._wanted:
+                        return False
                     self._extras[info.name] = db
+                    if not self._holding:
+                        return False
         return complete
 
     def release_extras(self) -> None:
@@ -382,12 +397,17 @@ class SolverDatabases:
         """
         with self._lock:
             self._holding = False
-            keep = self._wanted.name if self._wanted != self._active else None
-            dropped = [name for name in self._extras if name != keep]
-            for name in dropped:
-                del self._extras[name]
+            dropped = self._drop_unwanted_extras_locked()
         if dropped:
             logger.info("Released solver databases held for the FOV search: %s", ", ".join(dropped))
+
+    def _drop_unwanted_extras_locked(self) -> list[str]:
+        """Drop every extra except the one a pending swap wants. Caller holds ``_lock``."""
+        keep = self._wanted.name if self._wanted != self._active else None
+        dropped = [name for name in self._extras if name != keep]
+        for name in dropped:
+            del self._extras[name]
+        return dropped
 
     # -- internals ------------------------------------------------------------
 

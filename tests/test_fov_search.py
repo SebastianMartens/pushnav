@@ -493,3 +493,106 @@ class TestSearchLoading:
         solver.solve_frame = solve
         result = profile.solve_for_sync(solver, b"frame")
         assert not FakeSolver.is_valid(result)
+
+
+class TestSearchEndsWhileLoading:
+    """Re-review fixes: a search that ends or is replaced while a database loads."""
+
+    @staticmethod
+    def _profile(tmp_path, gate=None):
+        import threading
+        loads, entered = [], threading.Event()
+
+        def loader(path):
+            loads.append(path.name)
+            if gate is not None and path.name == "wide.bin" and loads.count("wide.bin") == 1:
+                entered.set()
+                assert gate.wait(5)
+            return FakeDb(path)
+
+        solver = FakeSolver()
+        solver.databases = SolverDatabases([NARROW, WIDE], 8.86, loader=loader)
+        cfg, profile, _box = make_profile(tmp_path, solver)
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        return solver, profile, loads, entered
+
+    @pytest.mark.parametrize("user_fov,db_after", [(8.5, "narrow"), (25.6, "wide")])
+    def test_two_callers_do_not_load_the_same_database_twice(self, tmp_path, user_fov, db_after):
+        import threading
+        gate = threading.Event()
+        solver, profile, loads, entered = self._profile(tmp_path, gate)
+        threads = [threading.Thread(target=profile.plan) for _ in range(2)]
+        for t in threads:
+            t.start()
+        assert entered.wait(5)
+        assert wait_for(lambda: True, 0.1)  # let the second caller queue on the load lock
+        profile.set_user_fov(fov_h_deg=user_fov)  # the search ends mid-load
+        gate.set()
+        for t in threads:
+            t.join(5)
+        solver.databases.apply_pending()
+        assert solver.databases.active.name == db_after
+        assert loads.count("wide.bin") == 1                # never twice (kept for the swap if wanted)
+        assert loads.count("narrow.bin") == 1
+        assert [i.name for i in solver.databases.loaded()] == [db_after]
+        assert not solver.databases.holding
+
+    def test_a_stale_load_does_not_disarm_the_next_search(self, tmp_path):
+        import threading
+        gate = threading.Event()
+        solver, profile, loads, entered = self._profile(tmp_path, gate)
+        db = solver.databases
+        a = threading.Thread(target=profile.plan)          # search S1 loads wide ...
+        a.start()
+        assert entered.wait(5)
+        profile.set_user_fov(fov_h_deg=8.5)                # ... S1 ends,
+        profile.set_user_fov(reset=True)                   # S2 starts
+        assert profile.searching
+        b = threading.Thread(target=profile.plan)          # S2's first frame
+        b.start()
+        assert wait_for(lambda: db.holding)
+        gate.set()
+        a.join(5)
+        b.join(5)
+        assert profile.searching and db.holding
+        assert [i.name for i in db.loaded()] == ["narrow", "wide"]
+        assert {profile.plan().database.name for _ in range(4)} == {"narrow", "wide"}
+        assert loads.count("wide.bin") == 1
+
+    def test_the_holding_is_re_armed_when_it_was_cleared_under_a_running_search(self, tmp_path):
+        solver, profile, loads, _entered = self._profile(tmp_path)
+        profile.plan()
+        solver.databases.release_extras()                  # a stale caller released it
+        assert {profile.plan().database.name for _ in range(4)} == {"narrow", "wide"}
+        assert solver.databases.holding
+        assert loads.count("wide.bin") == 2                # loaded again after the release, once
+
+
+class TestKeptCopyDoesNotLeak:
+    def test_a_later_request_for_the_active_database_drops_the_kept_copy(self):
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=FakeDb)
+        dbs.hold_all()
+        dbs.request_for_fov(25.6)
+        dbs.release_extras()                               # wide kept for the pending swap
+        assert list(dbs._extras) == ["wide"]
+        dbs.request_for_fov(8.86)                          # the swap is no longer wanted
+        assert list(dbs._extras) == []
+        assert [i.name for i in dbs.loaded()] == ["narrow"]
+
+    def test_a_request_during_the_search_keeps_the_held_databases(self):
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=FakeDb)
+        dbs.hold_all()
+        dbs.request_for_fov(8.86)
+        assert [i.name for i in dbs.loaded()] == ["narrow", "wide"]
+
+    def test_found_wide_then_the_user_enters_50_mm_before_the_swap(self, tmp_path):
+        solver = FakeSolver(solves_on="wide", solved_fov=25.6)
+        _cfg, profile, _box = make_profile(tmp_path, solver)
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        profile.solve_for_sync(solver, b"frame")           # found wide; the swap is pending
+        assert [i.name for i in solver.databases.loaded()] == ["narrow", "wide"]
+        profile.set_user_fov(focal_length_mm=50)           # 13 deg: closest is the active narrow
+        solver.databases.apply_pending()
+        assert solver.databases._extras == {}
+        profile.on_camera_connected(IDS_SENSOR_HELLO)      # reconnect
+        assert solver.databases._extras == {}
