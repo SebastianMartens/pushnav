@@ -50,9 +50,23 @@ _MJPEG_BOUNDARY = b"frame"
 _MJPEG_INTERVAL = 0.1  # 10 Hz
 
 # Camera image geometry — must match the React UI's overlay assumptions.
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md section 5.6)
+# These are only the defaults: with no camera_geometry provider (tests) or no camera
+# connected, as before. The engine supplies the connected camera's values.
 _FOV_H = 8.86   # horizontal FOV in degrees
 _IMG_W = 1280
 _IMG_H = 720
+
+
+def _default_geometry() -> dict:
+    return {
+        "image_w": _IMG_W,
+        "image_h": _IMG_H,
+        "fov_h_deg": _FOV_H,
+        "fov_source": "default",
+        "solver_db": None,
+        "fov_out_of_range": False,
+    }
 
 
 class EngineActions(Protocol):
@@ -77,15 +91,22 @@ class EngineActions(Protocol):
     ) -> None: ...
 
 
-def _compute_origin(config: ConfigManager) -> tuple[float, float]:
+def _compute_origin(
+    config: ConfigManager,
+    fov_h: float = _FOV_H,  # fork: camera-controls
+    img_w: int = _IMG_W,  # fork: camera-controls
+    img_h: int = _IMG_H,  # fork: camera-controls
+) -> tuple[float, float]:
     """Pixel position of the sync offset (pointing center) in image coords.
 
     Falls back to image center when no sync calibration is available.
+    ``fov_h`` (horizontal FOV, degrees) and the image size come from the engine
+    (spec 5.6); the defaults are the legacy 8.86 deg / 1280x720.
     """
-    cx, cy = _IMG_W / 2.0, _IMG_H / 2.0
+    cx, cy = img_w / 2.0, img_h / 2.0
     d_body = config.sync_d_body
     if d_body is not None and d_body[2] > 0.1:
-        scale = _IMG_W / (2.0 * math.tan(math.radians(_FOV_H / 2.0)))
+        scale = img_w / (2.0 * math.tan(math.radians(fov_h / 2.0)))
         cx += (-d_body[0] / d_body[2]) * scale
         cy += (-d_body[1] / d_body[2]) * scale
     return cx, cy
@@ -150,6 +171,7 @@ class WebServer:
         stellarium_object: Callable[[], dict | None] | None = None,
         server_errors: Callable[[], list[dict]] | None = None,
         camera_controls: Callable[[], list[dict] | None] | None = None,
+        camera_geometry: Callable[[], dict] | None = None,  # fork: camera-controls
         sync_state: Callable[[], dict] | None = None,
         activity: Callable[[], dict] | None = None,
         stellarium_location: Callable[[], dict | None] | None = None,
@@ -168,6 +190,7 @@ class WebServer:
         self._stellarium_object = stellarium_object
         self._server_errors = server_errors
         self._camera_controls = camera_controls
+        self._camera_geometry = camera_geometry  # fork: camera-controls
         self._sync_state = sync_state
         self._activity = activity
         self._stellarium_location = stellarium_location
@@ -571,9 +594,12 @@ class WebServer:
         snap = self._pointing.read()
         target = self._goto_target.read()
         failures = self._solver_failures() if self._solver_failures else 0
-        origin_x, origin_y = _compute_origin(self._config)
-        dx_off = origin_x - _IMG_W / 2.0
-        dy_off = origin_y - _IMG_H / 2.0
+        # fork: camera-controls: geometry and FOV of the connected camera (spec 5.6)
+        geo = self._camera_geometry() if self._camera_geometry else _default_geometry()
+        img_w, img_h, fov_h = geo["image_w"], geo["image_h"], geo["fov_h_deg"]
+        origin_x, origin_y = _compute_origin(self._config, fov_h, img_w, img_h)
+        dx_off = origin_x - img_w / 2.0
+        dy_off = origin_y - img_h / 2.0
 
         pointing_data = {
             "valid": snap.valid,
@@ -588,7 +614,7 @@ class WebServer:
             ),
         }
 
-        nav_data = self._build_nav(snap, target, origin_x, origin_y, dx_off, dy_off)
+        nav_data = self._build_nav(snap, target, origin_x, origin_y, dx_off, dy_off, fov_h, img_w, img_h)
 
         controls = self._camera_controls() if self._camera_controls else []
         sync_blk = self._sync_state() if self._sync_state else {
@@ -623,10 +649,15 @@ class WebServer:
             "nav": nav_data,
             "origin_x": origin_x,
             "origin_y": origin_y,
-            "image_w": _IMG_W,
-            "image_h": _IMG_H,
+            "image_w": img_w,
+            "image_h": img_h,
             "finder_rotation": self._config.finder_rotation,
-            "fov_h_deg": _FOV_H,
+            "fov_h_deg": fov_h,
+            # fork: camera-controls: how the FOV was set ("user" | "learned" | "default"),
+            # the loaded solver database, and the no-database-covers-this-FOV flag
+            "fov_source": geo.get("fov_source", "default"),
+            "solver_db": geo.get("solver_db"),
+            "fov_out_of_range": bool(geo.get("fov_out_of_range", False)),
             "has_calibration": self._config.has_calibration,
             "image_size": list(snap.image_size) if snap.valid and snap.image_size else None,
             "controls": controls or [],
@@ -647,7 +678,10 @@ class WebServer:
             "server_errors": self._server_errors() if self._server_errors else [],
         }
 
-    def _build_nav(self, snap, target, origin_x, origin_y, dx_off, dy_off) -> dict | None:
+    def _build_nav(
+        self, snap, target, origin_x, origin_y, dx_off, dy_off,
+        fov_h: float = _FOV_H, img_w: int = _IMG_W, img_h: int = _IMG_H,  # fork: camera-controls
+    ) -> dict | None:
         if not target.active:
             return None
 
@@ -673,7 +707,7 @@ class WebServer:
         nav = compute_navigation(
             snap.ra_j2000, snap.dec_j2000, snap.roll,
             target.ra_j2000, target.dec_j2000,
-            _FOV_H, _IMG_W, _IMG_H,
+            fov_h, img_w, img_h,
         )
 
         # Apply sync offset to in-FOV pixel coords so the React side renders the
@@ -691,8 +725,8 @@ class WebServer:
         in_fov = (
             offset_pixel_x is not None
             and offset_pixel_y is not None
-            and 0 <= offset_pixel_x < _IMG_W
-            and 0 <= offset_pixel_y < _IMG_H
+            and 0 <= offset_pixel_x < img_w
+            and 0 <= offset_pixel_y < img_h
         )
 
         edge_x = edge_y = edge_angle = None
@@ -700,17 +734,17 @@ class WebServer:
             if offset_pixel_x is not None:
                 edge_x, edge_y, edge_angle = edge_arrow_position(
                     offset_pixel_x, offset_pixel_y,
-                    _IMG_W, _IMG_H, margin=68,
+                    img_w, img_h, margin=68,
                     origin_x=origin_x, origin_y=origin_y,
                 )
             else:
                 # Target behind camera — derive direction from camera_angle_deg
-                far = max(_IMG_W, _IMG_H) * 10.0
+                far = max(img_w, img_h) * 10.0
                 rad = math.radians(nav.camera_angle_deg)
                 far_x = origin_x + far * math.sin(rad)
                 far_y = origin_y - far * math.cos(rad)
                 edge_x, edge_y, edge_angle = edge_arrow_position(
-                    far_x, far_y, _IMG_W, _IMG_H, margin=68,
+                    far_x, far_y, img_w, img_h, margin=68,
                     origin_x=origin_x, origin_y=origin_y,
                 )
 

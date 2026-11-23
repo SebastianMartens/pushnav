@@ -28,8 +28,10 @@ from evf.config.manager import ConfigManager
 from evf.engine.frame_buffer import LatestFrame
 from evf.engine.pointing import PointingState
 from evf.engine.state import EngineState, StateMachine
+from evf.solver import databases as databases_module
 from evf.solver.databases import (
     DbInfo,
+    NarrowDatabaseInvalid,
     NarrowDatabaseMissing,
     SolverDatabases,
     load_registry,
@@ -100,6 +102,14 @@ class TestSelectDatabase:
         with pytest.raises(ValueError):
             select_database([], 8.86)
 
+    @pytest.mark.parametrize("fov", [float("nan"), float("inf"), float("-inf"), 0.0, -5.0, 180.0, 270.0, "8.86", None, True])
+    def test_invalid_fov_is_rejected(self, fov):
+        """distance_to(nan) is 0.0, so NaN used to count as "in range" of the
+        narrower database; it must never reach the selection."""
+        assert NARROW.distance_to(float("nan")) == 0.0  # the trap this guards against
+        with pytest.raises(ValueError):
+            select_database([NARROW, WIDE], fov)
+
 
 # ---------------------------------------------------------------------------
 # solver parameters
@@ -109,6 +119,20 @@ class TestSelectDatabase:
 class TestSolverParams:
     def test_legacy_is_todays_values(self):
         assert LEGACY_SOLVER_PARAMS == SolverParams(8.86, 1.5)
+
+    @pytest.mark.parametrize("fov", [float("nan"), float("inf"), 0.0, -1.0, 180.0, 359.0])
+    def test_invalid_fov_is_rejected(self, fov):
+        with pytest.raises(ValueError):
+            SolverParams.for_fov(fov)
+        with pytest.raises(ValueError):
+            max_error_for_fov(fov)
+
+    def test_upper_bound_is_exclusive(self):
+        from evf.solver.fov import validate_fov
+
+        assert validate_fov(179.9) == 179.9
+        with pytest.raises(ValueError):
+            validate_fov(180.0)
 
     def test_max_error_rule(self):
         assert max_error_for_fov(8.86) == 1.5
@@ -183,12 +207,58 @@ class TestLoadRegistry:
                 load_registry(tmp_path)
         assert "n.bin" in caplog.text
 
-    def test_missing_narrow_file_without_registry_fails_at_load(self, tmp_path):
-        """No registry: the fallback entry points at tetra3rs_gaia.bin; a real
-        load of a missing file raises as before."""
-        info = load_registry(tmp_path)[0]
-        with pytest.raises(Exception):
-            SolverDatabases([DbInfo(info.name, tmp_path / "nope.bin", 7.0, 10.0)], 8.86)
+    def test_missing_narrow_file_without_registry_fails_at_load(self, tmp_path, monkeypatch):
+        """No registry: load_registry() falls back to tetra3rs_gaia.bin. With
+        that file gone, creating the default PlateSolver fails at the load, as
+        a missing tetra3rs_gaia.bin always did (the engine logs it and runs
+        without a solver)."""
+        missing = tmp_path / "tetra3rs_gaia.bin"
+        monkeypatch.setattr(databases_module, "solver_db_dir", lambda: tmp_path)
+        monkeypatch.setattr(databases_module, "tetra3rs_database_path", lambda: missing)
+        assert not (tmp_path / "solver_dbs.json").exists()
+        infos = load_registry()
+        assert [i.name for i in infos] == ["narrow"]
+        assert infos[0].path == missing  # the fallback path, not a registry entry
+        with pytest.raises(OSError):
+            PlateSolver()
+
+    def test_narrow_with_invalid_range_fails_loudly(self, tmp_path, caplog):
+        """A narrow entry with a bad range must not be skipped: with the wide
+        entry left, 8.86 deg would silently select wide and never solve."""
+        _write_registry(tmp_path, [
+            _entry("narrow", "n.bin", 10, 7),
+            _entry("wide", "w.bin", 18, 32),
+        ])
+        with caplog.at_level("ERROR", logger="evf.solver.databases"):
+            with pytest.raises(NarrowDatabaseInvalid):
+                load_registry(tmp_path)
+        assert "narrow" in caplog.text
+
+    @pytest.mark.parametrize("lo,hi", [(0, 10), (-1, 10), (7, 7), (float("nan"), 10), (7, float("inf"))])
+    def test_narrow_with_each_kind_of_bad_range_fails_loudly(self, tmp_path, lo, hi):
+        _write_registry(tmp_path, [_entry("narrow", "n.bin", lo, hi), _entry("wide", "w.bin", 18, 32)])
+        with pytest.raises(NarrowDatabaseInvalid):
+            load_registry(tmp_path)
+
+    def test_narrow_with_a_path_separator_fails_loudly(self, tmp_path):
+        (tmp_path / "w.bin").write_bytes(b"x")
+        _write_registry(tmp_path, [
+            _entry("narrow", "sub/n.bin", 7, 10),
+            _entry("wide", "w.bin", 18, 32),
+        ], touch=False)
+        with pytest.raises(NarrowDatabaseInvalid):
+            load_registry(tmp_path)
+
+    def test_registry_listing_only_wide_fails_loudly(self, tmp_path):
+        _write_registry(tmp_path, [_entry("wide", "w.bin", 18, 32)])
+        with pytest.raises(NarrowDatabaseInvalid, match="narrow"):
+            load_registry(tmp_path)
+
+    def test_narrow_failures_are_both_narrow_database_errors(self):
+        from evf.solver.databases import NarrowDatabaseError
+
+        assert issubclass(NarrowDatabaseMissing, NarrowDatabaseError)
+        assert issubclass(NarrowDatabaseInvalid, NarrowDatabaseError)
 
     def test_file_with_path_separator_is_skipped(self, tmp_path):
         sub = tmp_path / "sub"
@@ -312,6 +382,18 @@ class TestSolverDatabases:
         assert dbs.apply_pending() is False
         assert len(loader.calls) == 1
 
+    @pytest.mark.parametrize("fov", [float("nan"), float("inf"), 0.0, -3.0, 180.0])
+    def test_invalid_request_is_rejected_and_changes_nothing(self, fov):
+        loader = RecordingLoader()
+        dbs = SolverDatabases([NARROW, WIDE], 25.6, loader=loader)
+        with pytest.raises(ValueError):
+            dbs.request_for_fov(fov)
+        assert dbs.in_range is True  # the last good FOV is still the one in effect
+        assert dbs.apply_pending() is False
+        assert dbs.active.name == "wide"
+        with pytest.raises(ValueError):
+            SolverDatabases([NARROW, WIDE], fov, loader=loader)
+
     def test_last_request_wins(self):
         loader = RecordingLoader()
         dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=loader)
@@ -423,6 +505,59 @@ class TestRequestDuringLoad:
         assert dbs.apply_pending() is False
         assert dbs.active.name == "wide"
         assert [c[0] for c in loader.calls].count("wide") == 1
+
+    def test_two_concurrent_callers_load_the_file_once(self):
+        """The solver thread and the engine can both call apply_pending(); two
+        simultaneous loads would double the peak RAM on a Pi. The second caller
+        waits on the load lock and then finds the swap done."""
+        started = threading.Event()
+        release = threading.Event()
+        loads: list[str] = []
+
+        def gated_loader(path):
+            if path.stem == "wide":
+                loads.append(path.stem)
+                started.set()
+                assert release.wait(10)
+            return FakeDb(path)
+
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=gated_loader)
+        dbs.request_for_fov(25.6)
+        results: list[bool] = []
+
+        def call():
+            results.append(dbs.apply_pending())
+
+        first = threading.Thread(target=call)
+        first.start()
+        assert started.wait(5)  # the first caller is inside the load
+        second = threading.Thread(target=call)
+        second.start()
+        time.sleep(0.2)  # the second caller is parked on the load lock
+        assert loads == ["wide"] and not results
+        release.set()
+        first.join(10)
+        second.join(10)
+        assert loads == ["wide"]  # exactly one load
+        assert sorted(results) == [False, True]
+        assert dbs.active.name == "wide"
+
+    def test_three_callers_after_one_request_still_load_once(self):
+        loads: list[str] = []
+
+        def loader(path):
+            loads.append(path.stem)
+            time.sleep(0.05)
+            return FakeDb(path)
+
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=loader)
+        dbs.request_for_fov(25.6)
+        threads = [threading.Thread(target=dbs.apply_pending) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        assert loads == ["narrow", "wide"]  # the initial load, then one swap load
 
     def test_failed_load_does_not_block_a_newer_request(self):
         loader = GatedLoader("wide")

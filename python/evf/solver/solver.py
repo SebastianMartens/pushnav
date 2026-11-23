@@ -57,25 +57,28 @@ class PlateSolver:
     """Load a tetra3rs database and solve frames on demand.
 
     Which database is loaded comes from the registry in ``solver_dbs.json``
-    (``evf.solver.databases``). Only one is loaded at a time; the engine
-    starts with the one for the legacy 8.86 deg FOV (narrow). A swap is
+    (``evf.solver.databases``). Only one is loaded at a time: the one for
+    ``initial_fov_deg`` (default the legacy 8.86 deg, narrow). A swap is
     requested through ``databases`` and done by ``apply_pending_database()``
-    on the solver thread.
+    (the solver thread between solves; the engine when none runs).
     """
 
     def __init__(
         self,
         database_path: Path | None = None,
         databases: SolverDatabases | None = None,
+        initial_fov_deg: float = LEGACY_FOV_DEG,  # fork: camera-controls
     ) -> None:
         if databases is not None:
             self._databases = databases
         elif database_path is not None:
             # Explicit file (tests, tools): a registry of one, valid for any FOV.
             info = DbInfo(Path(database_path).stem, Path(database_path), 0.1, 180.0)
-            self._databases = SolverDatabases([info], LEGACY_FOV_DEG)
+            self._databases = SolverDatabases([info], initial_fov_deg)
         else:
-            self._databases = SolverDatabases(load_registry(), LEGACY_FOV_DEG)
+            # initial_fov_deg: the FOV of the last used camera profile, so the
+            # database for it is the one loaded at startup (spec 5.4.3).
+            self._databases = SolverDatabases(load_registry(), initial_fov_deg)
 
     @property
     def databases(self) -> SolverDatabases:

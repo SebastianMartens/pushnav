@@ -32,7 +32,13 @@ DEFAULT_CONFIG = {
     "solver": {"min_matches": 8, "max_prob": 0.2},
     # fork: camera-server-dotnet (see specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md section 8.1)
     # windows_server: "dotnet" (C# camera server, default) or "c" (C/DirectShow); Windows only.
-    "camera": {"exposure": None, "gain": None, "extra_camera_ids": [], "windows_server": "dotnet"},
+    "camera": {
+        "exposure": None, "gain": None, "extra_camera_ids": [], "windows_server": "dotnet",
+        # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md section 4.1)
+        # Per-camera profiles (evf/config/profiles.py); CONFIG_VERSION stays 1 so old files
+        # keep their values and pick these up through _merge_defaults.
+        "max_exposure_us": 4000000, "last_camera_key": None, "profiles": {},
+    },
     "calibration": {"finder_rotation": 0.0, "sync_d_body": None},
     "logging": {"verbose": False},
     "audio": {"enabled": True},

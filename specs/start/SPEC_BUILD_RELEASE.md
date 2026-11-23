@@ -42,7 +42,9 @@ pushnav/
     windows/          # C/DirectShow camera server
 
   data/
-    tetra3rs_gaia.bin
+    tetra3rs_gaia.bin         # narrow solver database, FOV 7-10 deg
+    tetra3rs_gaia_wide.bin    # fork: wide solver database, FOV 18-32 deg
+    solver_dbs.json           # fork: registry of the two (FOV ranges, counts, hashes)
     VERSION.json
     sounds/
 
@@ -144,6 +146,8 @@ PushNav.app/
       ...                # Nuitka support files
     Resources/
       tetra3rs_gaia.bin
+      tetra3rs_gaia_wide.bin  # fork
+      solver_dbs.json         # fork
       VERSION.json
       sounds/
       web_dist/
@@ -251,7 +255,8 @@ The app creates directories if missing.
 Centralized path resolution handles dev repo, macOS .app bundle, Linux release, and
 Windows release:
 
-- `tetra3rs_database_path()` — tetra3rs star catalog (`tetra3rs_gaia.bin`)
+- `tetra3rs_database_path()` — tetra3rs star catalog (`tetra3rs_gaia.bin`, the narrow database)
+- `solver_db_dir()` — fork: directory with `solver_dbs.json` and both database files
 - `camera_binary_path()` — platform-specific camera server binary
 - `sounds_dir()` — audio files
 - `web_dist_dir()` — built React UI (release-only; in dev served by Vite on :5173)
@@ -303,7 +308,8 @@ Launch with `--dev` flag for debug features.
 {
   "app_version": "<x.y.z>",
   "protocol_version": 1,
-  "solver_db_version": "tetra3rs_gaia_<hash>_mag8"
+  "solver_db_version": "tetra3rs_gaia_<hash>_mag8",
+  "solver_db_version_wide": "tetra3rs_gaia_wide_<hash>_mag7"
 }
 ```
 

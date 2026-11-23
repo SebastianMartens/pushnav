@@ -71,6 +71,9 @@ internal sealed class FakeBackend : ICameraBackend
 
     public int DefaultFps => (int)Math.Round(DefaultFpsValue);
 
+    /// <summary>The IDS UI-306xCP-M (IMX174, 5.86 um), whatever the replayed images measure: the sensor is what the engine plans the optics with.</summary>
+    public SensorInfo? Sensor { get; } = new(1936, 1216, 5.86, true);
+
     /// <summary>Frames produced since <see cref="Start"/> (tests, diagnostics).</summary>
     public long FramesProduced => Interlocked.Read(ref _framesProduced);
 

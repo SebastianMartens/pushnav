@@ -379,6 +379,19 @@ class TestCSharpServerBehavior:
         assert (image.width, image.height) == (hello["default_width"], hello["default_height"])
         assert image.size == (1280, 720)  # the sample images, not a hardcoded size
 
+    def test_hello_carries_camera_key_and_sensor_in_a_v1_session(self, exe_server):
+        """Task 7.0: the engine's profile key and the sensor size, with the protocol still v1."""
+        with exe_server.connect() as sock:
+            hello, _ = _handshake(sock)
+        assert hello["protocol_version"] == 1
+        assert "max_protocol_version" not in hello
+        key = hello["camera_key"]
+        assert isinstance(key, str) and key.count(":") >= 1 and key.split(":")[0] == _exe_backend()
+        sensor = hello["capabilities"]["sensor"]
+        assert sensor["width"] > 0 and sensor["height"] > 0
+        assert isinstance(sensor["mono"], bool)
+        assert sensor.get("pixel_size_um", 1.0) > 0
+
     def test_exposure_uses_the_legacy_100us_unit_and_only_v1_controls(self, exe_server):
         with exe_server.connect() as sock:
             _, info = _handshake(sock)

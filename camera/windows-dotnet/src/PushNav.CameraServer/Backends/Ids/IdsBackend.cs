@@ -130,6 +130,22 @@ internal sealed class IdsBackend : ICameraBackend
 
     public int DefaultFps => (int)Math.Round(DefaultFpsValue);
 
+    /// <summary>The sensor facts the driver reported (<c>is_GetSensorInfo</c>); the pixel pitch is reported in nm.</summary>
+    public SensorInfo? Sensor
+    {
+        get
+        {
+            var sensor = _sensor;
+            return sensor.MaxWidth > 0 && sensor.MaxHeight > 0
+                ? new SensorInfo(
+                    sensor.MaxWidth,
+                    sensor.MaxHeight,
+                    sensor.PixelSizeNanometers > 0 ? sensor.PixelSizeNanometers / 1000.0 : null,
+                    sensor.IsMonochrome)
+                : null;
+        }
+    }
+
     /// <summary>Frames produced since <see cref="Start"/> (tests, diagnostics).</summary>
     public long FramesProduced => Interlocked.Read(ref _framesProduced);
 

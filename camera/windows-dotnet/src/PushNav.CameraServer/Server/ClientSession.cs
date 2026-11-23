@@ -190,12 +190,25 @@ internal sealed class ClientSession
             Backend = backend.HelloName,
             BackendVersion = BackendVersion,
             CameraModel = backend.Device.Model,
+            // Extras for every session (spec 11.2 / task 7.0): a v1 client ignores unknown HELLO keys, and the
+            // engine keys its per-camera profile on camera_key from the first connect on.
+            CameraKey = backend.Device.CameraKey,
+            CameraSerial = backend.Device.Serial,
             StreamFormat = "MJPEG",
             DefaultWidth = geometry.Width,
             DefaultHeight = geometry.Height,
             DefaultFps = backend.DefaultFps,
+            Capabilities = SensorCapabilities(backend.Sensor),
         };
     }
+
+    private static HelloCapabilities? SensorCapabilities(SensorInfo? sensor) =>
+        sensor == null
+            ? null
+            : new HelloCapabilities
+            {
+                Sensor = new HelloSensor { Width = sensor.Width, Height = sensor.Height, PixelSizeUm = sensor.PixelSizeUm, Mono = sensor.Mono },
+            };
 
     /// <summary>Assembly version as <c>major.minor.build</c> (HELLO <c>backend_version</c>).</summary>
     internal static string BackendVersion { get; } = ReadBackendVersion();

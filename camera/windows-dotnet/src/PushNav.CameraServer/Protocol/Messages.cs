@@ -21,6 +21,12 @@ internal sealed class HelloMessage
 
     public string CameraModel { get; init; } = "";
 
+    /// <summary>Stable per-model key the engine stores per-camera settings under (<c>ids:1409:3060</c>); a v1 client ignores it.</summary>
+    public string? CameraKey { get; init; }
+
+    /// <summary>Serial number, when the backend knows it.</summary>
+    public string? CameraSerial { get; init; }
+
     public string StreamFormat { get; init; } = "MJPEG";
 
     public int DefaultWidth { get; init; }
@@ -28,6 +34,28 @@ internal sealed class HelloMessage
     public int DefaultHeight { get; init; }
 
     public int DefaultFps { get; init; }
+
+    /// <summary>Features of the opened camera that do not change during the session (protocol 11.3); only <c>sensor</c> so far.</summary>
+    public HelloCapabilities? Capabilities { get; init; }
+}
+
+/// <summary>HELLO <c>capabilities</c> (SPEC_PROTOCOL_CAMERA.md 11.3). Unknown keys are ignored by clients.</summary>
+internal sealed class HelloCapabilities
+{
+    public HelloSensor? Sensor { get; init; }
+}
+
+/// <summary>Physical sensor size, pixel pitch and mono flag; the engine derives plate scale and FOV from it.</summary>
+internal sealed class HelloSensor
+{
+    public int Width { get; init; }
+
+    public int Height { get; init; }
+
+    /// <summary>Pixel pitch in micrometres; omitted when unknown.</summary>
+    public double? PixelSizeUm { get; init; }
+
+    public bool Mono { get; init; }
 }
 
 /// <summary>App -> camera HELLO. Only <c>protocol_version</c> matters to the server; the rest is informational.</summary>
