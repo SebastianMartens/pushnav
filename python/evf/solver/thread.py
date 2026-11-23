@@ -32,7 +32,7 @@ from evf.engine.state import EngineState, InvalidTransitionError, StateMachine
 from evf.engine.navigation import angular_separation, sky_position_angle
 from evf.solver.solver import PlateSolver
 # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
-from evf.solver.fov import LEGACY_SOLVER_PARAMS
+from evf.solver.fov import SolverParamsHolder
 from evf.solver.sync import apply_body_frame_sync
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,7 @@ class SolverThread:
         state_machine: StateMachine,
         config: ConfigManager,
         audio: AudioAlert | None = None,
+        solver_params: SolverParamsHolder | None = None,  # fork: camera-controls
     ) -> None:
         self._solver = solver
         self._frame_buffer = frame_buffer
@@ -61,6 +62,9 @@ class SolverThread:
         self._state_machine = state_machine
         self._config = config
         self._audio = audio
+        # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+        # The engine's holder; a standalone thread solves the legacy 8.86 deg / 1.5 deg.
+        self._solver_params = solver_params if solver_params is not None else SolverParamsHolder()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._consecutive_failures = 0
@@ -220,10 +224,11 @@ class SolverThread:
 
             try:
                 t_start = time.monotonic()
+                params = self._solver_params.get()  # fork: camera-controls; one snapshot per solve
                 result = self._solver.solve_frame(
                     jpeg_bytes,
-                    LEGACY_SOLVER_PARAMS.fov_estimate_deg,  # fork: camera-controls
-                    LEGACY_SOLVER_PARAMS.fov_max_error_deg,
+                    params.fov_estimate_deg,
+                    params.fov_max_error_deg,
                 )
                 t_total = (time.monotonic() - t_start) * 1000
                 logger.debug(

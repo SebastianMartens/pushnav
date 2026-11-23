@@ -42,7 +42,7 @@ from evf.engine.state import EngineState, StateMachine
 from evf.engine.status_led import StatusLedController, find_leds
 from evf.solver.solver import PlateSolver
 # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
-from evf.solver.fov import LEGACY_SOLVER_PARAMS
+from evf.engine.camera_profile import CameraProfile
 import numpy as np
 
 from evf.solver.sync import (
@@ -146,6 +146,12 @@ class Engine:
 
         # Sample injector (continuous JPEG injection for dev/debug)
         self._sample_injector = SampleInjector(self._frame_buffer)
+
+        # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+        # Active camera profile, solver FOV and stream geometry.
+        self._camera_profile = CameraProfile(
+            self._config, self._frame_buffer, lambda: self._solver
+        )
 
         # Components (created during startup)
         self._solver: PlateSolver | None = None
@@ -469,7 +475,9 @@ class Engine:
     def startup_solver(self) -> None:
         """Load tetra3rs database (~1s)."""
         try:
-            self._solver = PlateSolver()
+            # fork: camera-controls: load the database of the last used camera's FOV
+            self._solver = PlateSolver(initial_fov_deg=self._camera_profile.restore_last())
+            self._camera_profile.request_database()
         except Exception as exc:
             logger.error("Failed to load tetra3rs database: %s", exc)
 
@@ -527,6 +535,7 @@ class Engine:
                 stellarium_object=lambda: self.stellarium_object,
                 server_errors=lambda: self.server_errors,
                 camera_controls=lambda: self.camera_controls,
+                camera_geometry=self._camera_profile.geometry_payload,  # fork: camera-controls
                 sync_state=lambda: {
                     "in_progress": self.sync_in_progress,
                     "candidates": [
@@ -594,6 +603,7 @@ class Engine:
             hello = self._subprocess_mgr.start()
             logger.info("Camera connected: %s", hello)
             self._camera_wait_logged = False
+            self._fork_camera_connected(hello)
 
             client = self._subprocess_mgr.client
             if client:
@@ -621,6 +631,7 @@ class Engine:
         except Exception as exc:
             logger.error("Failed to start camera: %s", exc)
             self._subprocess_mgr = None
+            self._camera_profile.on_camera_gone()  # fork: camera-controls
 
     def retry_camera(self) -> bool:
         """Re-attempt camera startup on demand (e.g. user just plugged it in).
@@ -750,6 +761,7 @@ class Engine:
                 self._state_machine,
                 self._config,
                 audio=self._audio,
+                solver_params=self._camera_profile.params,  # fork: camera-controls
             )
             # Wire solver failure count into web server for audio event detection
             if self._webserver is not None:
@@ -833,10 +845,14 @@ class Engine:
             if frame_data is None:
                 self._sync_error = "No camera frame available"
                 return
+            # fork: camera-controls: no solver thread runs in SYNC, so a pending
+            # database swap (new camera / FOV) is done here, before the solve.
+            self._solver.apply_pending_database()
+            params = self._camera_profile.params.get()
             result = self._solver.solve_frame(
                 frame_data,
-                LEGACY_SOLVER_PARAMS.fov_estimate_deg,  # fork: camera-controls
-                LEGACY_SOLVER_PARAMS.fov_max_error_deg,
+                params.fov_estimate_deg,
+                params.fov_max_error_deg,
             )
             if not PlateSolver.is_valid(
                 result, self._config.min_matches, self._config.max_prob
@@ -1018,6 +1034,17 @@ class Engine:
         logging.shutdown()
 
     # -- internal -------------------------------------------------------------
+
+    def _fork_camera_connected(self, hello: dict) -> None:
+        """fork: camera-controls. Activate the camera's profile, FOV and geometry.
+
+        A failure here must not take the camera down: the engine then keeps the
+        legacy FOV and geometry (today's behaviour).
+        """
+        try:
+            self._camera_profile.on_camera_connected(hello)
+        except Exception as exc:
+            logger.error("Could not activate the camera profile: %s", exc)
 
     def _log_version(self) -> None:
         try:
