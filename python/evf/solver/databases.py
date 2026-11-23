@@ -20,6 +20,8 @@ Rules:
   running (camera connect, sync solve). Callers are serialised by a load lock,
   so two of them never load at the same time: the old database is dropped
   once the new one loaded.
+* Exception (spec 5.4.3): FOV search holds every database for its duration
+  (:meth:`SolverDatabases.hold_all`, :meth:`SolverDatabases.release_extras`).
 """
 
 from __future__ import annotations
@@ -47,6 +49,10 @@ REGISTRY_FILENAME = "solver_dbs.json"
 # only has tetra3rs_gaia.bin keeps working exactly as before.
 _FALLBACK_NARROW_NAME = "narrow"
 _FALLBACK_NARROW_RANGE = (7.0, 10.0)
+
+
+class DatabaseNotLoaded(RuntimeError):
+    """A solve asked for a database that is not in memory (a FOV search ended meanwhile)."""
 
 
 class NarrowDatabaseError(Exception):
@@ -225,6 +231,8 @@ class SolverDatabases:
         self._wanted = selection.info
         self._fov_deg = initial_fov_deg
         self._failed: DbInfo | None = None  # target whose load failed (no retry loop)
+        self._extras: dict[str, Any] = {}  # fork: FOV search: loaded besides the active one
+        self._holding = False  # fork: a FOV search holds every database (hold_all .. release_extras)
 
     # -- read side ------------------------------------------------------------
 
@@ -256,6 +264,24 @@ class SolverDatabases:
     def select(self, fov_deg: float) -> DbSelection:
         return select_database(self._registry, fov_deg)
 
+    def db_for(self, info: DbInfo) -> Any | None:
+        """Handle of ``info``'s database if it is loaded (the active one, or held for FOV search)."""
+        with self._lock:
+            if info == self._active:
+                return self._db
+            return self._extras.get(info.name)
+
+    @property
+    def holding(self) -> bool:
+        """True from ``hold_all()`` until ``release_extras()`` (a FOV search is running)."""
+        with self._lock:
+            return self._holding
+
+    def loaded(self) -> list[DbInfo]:
+        """The databases whose handle is in memory, narrowest range first."""
+        with self._lock:
+            return [i for i in self._registry if i == self._active or i.name in self._extras]
+
     # -- swap -----------------------------------------------------------------
 
     def request_for_fov(self, fov_deg: float) -> DbSelection:
@@ -272,6 +298,8 @@ class SolverDatabases:
             self._wanted = selection.info
             self._fov_deg = fov_deg
             self._failed = None
+            if not self._holding:  # fork: a copy kept for an earlier swap must not outlive its use
+                self._drop_unwanted_extras_locked()
         if not selection.in_range:
             logger.warning(
                 "FOV %.2f deg is outside every solver database; using %r (%.1f..%.1f deg)",
@@ -300,8 +328,10 @@ class SolverDatabases:
             pending = self._wanted
             if pending == self._active or pending == self._failed:
                 return False
+            new_db = self._extras.get(pending.name)  # held for a FOV search: no second load
         try:
-            new_db = self._load(pending)
+            if new_db is None:
+                new_db = self._load(pending)
         except Exception as exc:  # noqa: BLE001 - keep solving with the old db
             logger.error("Failed to load solver database %r from %s: %s",
                          pending.name, pending.path, exc)
@@ -311,10 +341,73 @@ class SolverDatabases:
             return False
         with self._lock:
             old = self._active
+            old_db = self._db
+            self._extras.pop(pending.name, None)
+            if self._holding:  # a FOV search still needs the old one
+                self._extras[old.name] = old_db
             self._db = new_db  # old handle is freed when the last solve drops it
             self._active = pending
         logger.info("Solver database swapped: %s -> %s", old.name, pending.name)
         return True
+
+    # -- FOV search (spec 5.4.3 / 5.4.4) ----------------------------------------
+
+    def hold_all(self) -> bool:
+        """Load every registered database that is not loaded yet and keep it.
+
+        Only for the duration of a FOV search, which alternates solves between
+        the databases. Callers queue on the load lock like a swap does; a
+        database that fails to load is skipped (ERROR logged). While held, a
+        swap moves the old active database into the extras instead of dropping
+        it, and takes the new one from them instead of loading it again.
+
+        Returns True if every database is loaded afterwards, so the caller can
+        retry after a failure.
+        """
+        with self._lock:
+            self._holding = True
+        complete = True
+        for info in self._registry:
+            with self._load_lock:
+                with self._lock:
+                    if not self._holding:  # the search ended while we queued: load nothing more
+                        return False
+                    if info == self._active or info.name in self._extras:
+                        continue
+                try:
+                    db = self._load(info)
+                except Exception as exc:  # noqa: BLE001 - search with what is loaded
+                    logger.error("Failed to load solver database %r from %s: %s", info.name, info.path, exc)
+                    complete = False
+                    continue
+                with self._lock:
+                    # ... or while we loaded: keep it only if a pending swap wants it
+                    if not self._holding and info != self._wanted:
+                        return False
+                    self._extras[info.name] = db
+                    if not self._holding:
+                        return False
+        return complete
+
+    def release_extras(self) -> None:
+        """Drop the databases ``hold_all`` loaded; the active one stays.
+
+        A database that a pending swap wants stays until that swap adopts it, so
+        the end of a FOV search does not load it a second time.
+        """
+        with self._lock:
+            self._holding = False
+            dropped = self._drop_unwanted_extras_locked()
+        if dropped:
+            logger.info("Released solver databases held for the FOV search: %s", ", ".join(dropped))
+
+    def _drop_unwanted_extras_locked(self) -> list[str]:
+        """Drop every extra except the one a pending swap wants. Caller holds ``_lock``."""
+        keep = self._wanted.name if self._wanted != self._active else None
+        dropped = [name for name in self._extras if name != keep]
+        for name in dropped:
+            del self._extras[name]
+        return dropped
 
     # -- internals ------------------------------------------------------------
 

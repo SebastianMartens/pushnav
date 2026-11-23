@@ -55,6 +55,7 @@ class SolverThread:
         config: ConfigManager,
         audio: AudioAlert | None = None,
         solver_params: SolverParamsHolder | None = None,  # fork: camera-controls
+        fov_tracker=None,  # fork: camera-controls: engine.camera_profile.CameraProfile (FOV learning, search)
     ) -> None:
         self._solver = solver
         self._frame_buffer = frame_buffer
@@ -65,6 +66,7 @@ class SolverThread:
         # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
         # The engine's holder; a standalone thread solves the legacy 8.86 deg / 1.5 deg.
         self._solver_params = solver_params if solver_params is not None else SolverParamsHolder()
+        self._fov_tracker = fov_tracker
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._consecutive_failures = 0
@@ -205,6 +207,29 @@ class SolverThread:
         self._state_machine.transition(EngineState.WARMING_UP)
         return True
 
+    # fork: camera-controls: FOV learning and search (spec 5.2.2, 5.4.4). A problem there
+    # must never stop the solver, so these swallow and log.
+    def _fov_plan(self):
+        if self._fov_tracker is None:
+            return None
+        try:
+            return self._fov_tracker.plan()
+        except Exception as exc:  # noqa: BLE001 - fall back to the plain profile FOV
+            logger.error("FOV plan failed: %s", exc)
+            return None
+
+    def _fov_solve_succeeded(self, result: dict, plan) -> None:
+        if self._fov_tracker is None:
+            return
+        try:
+            self._fov_tracker.solve_succeeded(result, plan)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("FOV learning failed: %s", exc)
+
+    def _fov_solve_failed(self) -> None:
+        if self._fov_tracker is not None:
+            self._fov_tracker.solve_failed()
+
     def _run(self) -> None:
         last_frame_id = -1
         first_success = True
@@ -230,11 +255,16 @@ class SolverThread:
 
             try:
                 t_start = time.monotonic()
-                params = self._solver_params.get()  # fork: camera-controls; one snapshot per solve
+                # fork: camera-controls: one snapshot per solve; during a FOV search the
+                # plan names the database to solve with (spec 5.4.4)
+                plan = self._fov_plan()
+                params = plan.params if plan is not None else self._solver_params.get()
+                extra = {"database": plan.database} if plan is not None and plan.database is not None else {}
                 result = self._solver.solve_frame(
                     jpeg_bytes,
                     params.fov_estimate_deg,
                     params.fov_max_error_deg,
+                    **extra,
                 )
                 t_total = (time.monotonic() - t_start) * 1000
                 logger.debug(
@@ -245,6 +275,7 @@ class SolverThread:
                 )
             except Exception as exc:
                 logger.error("Solve error: %s", exc)
+                self._fov_solve_failed()  # fork: camera-controls
                 self._pointing.clear_centroids()
                 with self._lock:
                     self._consecutive_failures += 1
@@ -259,6 +290,7 @@ class SolverThread:
                 max_prob=self._config.max_prob,
             ):
                 ra, dec = result["RA"], result["Dec"]
+                self._fov_solve_succeeded(result, plan)  # fork: camera-controls
 
                 # Calibration check (uses raw plate-solve, before body-frame sync)
                 if self._state_machine.state == EngineState.CALIBRATE:
@@ -302,6 +334,7 @@ class SolverThread:
                     result["Prob"],
                 )
             else:
+                self._fov_solve_failed()  # fork: camera-controls
                 self._pointing.clear_centroids()
                 with self._lock:
                     self._consecutive_failures += 1

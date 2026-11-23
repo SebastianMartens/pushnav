@@ -422,7 +422,7 @@ class TestPayload:
         cp.restore_last()
         assert cp.geometry_payload() == {
             "image_w": 1280, "image_h": 720, "fov_h_deg": 8.86, "fov_source": "default",
-            "solver_db": "narrow", "fov_out_of_range": False,
+            "solver_db": "narrow", "fov_out_of_range": False, "camera_info": None,
         }
 
     def test_without_a_solver_there_is_no_database_name(self, cfg):
@@ -439,6 +439,8 @@ class TestPayload:
         assert cp.geometry_payload() == {
             "image_w": 1936, "image_h": 1216, "fov_h_deg": 25.6, "fov_source": "user",
             "solver_db": "wide", "fov_out_of_range": False,
+            "camera_info": {"camera_model": "UI306xCP-M", "backend": "windows-dotnet-ids",
+                            "camera_key": IDS_KEY, "sensor_width_mm": None, "focal_length_mm": None},
         }
 
     def test_fov_outside_every_database_sets_the_flag(self, cfg):

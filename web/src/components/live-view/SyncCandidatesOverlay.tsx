@@ -1,5 +1,10 @@
 import type { EnginePayload } from "@/lib/types";
 import { api } from "@/lib/api";
+import { overlayScale } from "@/lib/overlayScale"; // fork: camera-controls
+
+// fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md section 5.5, task 4.10):
+// marker radii, strokes, font sizes and offsets below are multiplied by k = overlayScale(image_w)
+// (image_w / 1280); at 1280 px k is 1 and nothing changes. Each use is marked with "k".
 
 interface Props {
   state: EnginePayload;
@@ -14,17 +19,18 @@ export function SyncCandidatesOverlay({ state }: Props) {
   const candidates = state.sync.candidates;
   const selectedIdx = state.sync.selected_idx;
   if (!candidates.length) return null;
+  const k = overlayScale(state.image_w); // fork: camera-controls: markers are sized for a 1280 px wide frame
 
   return (
     <g>
       {candidates.map((c, i) => {
         const isSelected = c.idx === selectedIdx;
-        const ringRadius = isSelected ? 26 : 18;
+        const ringRadius = (isSelected ? 26 : 18) * k;
         const ringStroke = isSelected ? "#ef4444" : "#dc2626";
         const ringOpacity = isSelected ? 1 : 0.55;
-        const strokeWidth = isSelected ? 3 : 2;
+        const strokeWidth = (isSelected ? 3 : 2) * k;
         const labelNum = i + 1;
-        const labelOffset = ringRadius + 12;
+        const labelOffset = ringRadius + 12 * k;
         return (
           <g
             key={c.idx}
@@ -35,7 +41,7 @@ export function SyncCandidatesOverlay({ state }: Props) {
             <circle
               cx={c.pixel_x}
               cy={c.pixel_y}
-              r={ringRadius + 8}
+              r={ringRadius + 8 * k}
               fill="transparent"
               stroke="none"
             />
@@ -52,7 +58,7 @@ export function SyncCandidatesOverlay({ state }: Props) {
               <circle
                 cx={c.pixel_x}
                 cy={c.pixel_y}
-                r={4}
+                r={4 * k}
                 fill="#ef4444"
               />
             )}
@@ -60,7 +66,7 @@ export function SyncCandidatesOverlay({ state }: Props) {
               x={c.pixel_x + labelOffset}
               y={c.pixel_y - labelOffset / 2}
               fill="#ef4444"
-              fontSize={20}
+              fontSize={20 * k}
               fontWeight="bold"
               opacity={isSelected ? 1 : 0.75}
               style={{ pointerEvents: "none", userSelect: "none" }}

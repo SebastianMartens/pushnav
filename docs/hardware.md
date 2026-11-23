@@ -80,7 +80,9 @@ PushNav also works with **IDS uEye** industrial cameras on Windows. The model it
 
 **Lens and plate solving.** The reference setup is a 25 mm lens on this sensor, a field of 25.6° × 16.2°. PushNav ships two star catalogs: the original one for a 7° to 10° field (the OV9281 setup) and a wide-field one for 18° to 32°, and it loads the one that fits the camera's field of view. That field of view is stored per camera in the config file, because it depends on the lens, not only on the sensor.
 
-Until the Settings panel has a field for it (tracked in [issue #3](https://github.com/SebastianMartens/pushnav/issues/3)), enter it by hand. Start PushNav once with the camera connected, quit it, then open `config.json` (Windows: `%APPDATA%\ElectronicViewfinder\config.json`) and fill in the camera's block under `camera` → `profiles`:
+**In the app:** open *Settings* → *Camera*. Type the focal length of your lens in millimetres (25 for the reference setup) and leave the field: PushNav works out the field of view from the lens and the sensor size (25.6° here), loads the matching star catalog and shows the field of view as "set by you". *Reset to learned* clears your value again. Without a focal length, a new IDS camera finds its field of view by itself: Settings shows "Finding field of view…" while PushNav tries both catalogs on the camera's frames, then keeps the first one that solves and stores the field of view as "learned from the sky". It keeps refining a learned value slowly while you track, but never changes a value you entered. If the field of view is not covered by either catalog, Settings says so.
+
+**By hand (alternative).** Start PushNav once with the camera connected, quit it, then open `config.json` (Windows: `%APPDATA%\ElectronicViewfinder\config.json`) and fill in the camera's block under `camera` → `profiles`:
 
 ```json
 "profiles": {

@@ -1,4 +1,9 @@
 import type { EnginePayload } from "@/lib/types";
+import { overlayScale } from "@/lib/overlayScale"; // fork: camera-controls
+
+// fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md section 5.5, task 4.10):
+// marker radii, strokes, font sizes and offsets below are multiplied by k = overlayScale(image_w)
+// (image_w / 1280); at 1280 px k is 1 and nothing changes. Each use is marked with "k".
 
 interface Props {
   state: EnginePayload;
@@ -9,6 +14,7 @@ interface Props {
  * Mirrors window.py _draw_star_overlay (~1828).
  */
 export function StarOverlay({ state }: Props) {
+  const k = overlayScale(state.image_w); // fork: camera-controls: markers are sized for a 1280 px wide frame
   const all = state.camera.all_centroids ?? [];
   const matched = state.camera.matched_centroids ?? [];
   const matchedKeys = new Set(
@@ -23,14 +29,14 @@ export function StarOverlay({ state }: Props) {
             key={i}
             cx={x}
             cy={y}
-            r={isMatched ? 8 : 6}
+            r={(isMatched ? 8 : 6) * k}
             fill="none"
             stroke={
               isMatched
                 ? "rgba(255, 70, 70, 0.86)"
                 : "rgba(150, 40, 40, 0.71)"
             }
-            strokeWidth={isMatched ? 2 : 1}
+            strokeWidth={(isMatched ? 2 : 1) * k}
           />
         );
       })}

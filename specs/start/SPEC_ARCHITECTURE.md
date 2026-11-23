@@ -457,13 +457,19 @@ Pixel scale:     24.9 arcsec/pixel
 
 The `fov_estimate` parameter uses the horizontal FOV (8.86 deg for the legacy setup), NOT the diagonal or radius.
 
-Resolution (`evf/solver/fov.py`, `SPEC_CAMERA_CONTROLS.md` §5.2; only steps 1 and 4 are implemented so far):
+Resolution (`evf/solver/fov.py`, `SPEC_CAMERA_CONTROLS.md` §5.2):
 
-1. `profiles[key].fov_h_deg` when it is set (`fov_source` `"user"`, or `"learned"` in a later release).
-   Until the Settings field exists, enter it by hand in `config.json` (see `docs/hardware.md`).
-2. *(not yet)* from a focal length and the sensor size.
-3. *(not yet)* FOV search.
-4. Otherwise 8.86° with the narrow database, exactly as before profiles existed.
+1. `profiles[key].fov_h_deg` when it is set (`fov_source` `"user"` or `"learned"`).
+2. A focal length entered in Settings (`POST /api/camera/fov`) is converted with the sensor size from HELLO and
+   stored as a `"user"` value, so this step ends in step 1.
+3. FOV search (`evf/solver/fov_search.py`): a profile with no FOV and a camera that reports its sensor size alternates
+   solves between the databases (both held while it runs) until one solves; its `fov_deg` is stored as `"learned"`.
+   `/ws` `fov_source` is `"searching"` meanwhile.
+4. Otherwise 8.86° with the narrow database, exactly as before profiles existed (cameras without a sensor size).
+
+A `"learned"` value is refined by `evf/solver/fov_learning.py`: after five consecutive valid solves the median of their
+`fov_deg` replaces it when it differs by more than 2 %, stays inside the active database's range minus 5 % of the range
+width at each end, and moves by at most 10 % (a bigger jump needs two agreeing rounds). A `"user"` value is never changed.
 
 A stored value that is not a finite number in (0, 180) degrees is ignored with a warning (step 4). The solver gets
 `fov_estimate_deg = fov` and `fov_max_error_deg = max(1.5, 0.10 * fov)` (1.5° at 8.86°, 2.56° at 25.6°),

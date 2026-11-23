@@ -1,0 +1,598 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# This file is part of PushNav (fork additions; see
+# specs/camera-server/SPEC_CAMERA_CONTROLS.md sections 5.4.3, 5.4.4, task 4.6).
+"""FOV search for a profile without a FOV: which database solves decides."""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from evf.config import profiles
+from evf.config.manager import ConfigManager
+from evf.engine.camera_profile import SolvePlan
+from evf.engine.engine import Engine
+from evf.engine.frame_buffer import LatestFrame
+from evf.engine.pointing import PointingState
+from evf.engine.state import EngineState, StateMachine
+from evf.solver.databases import SolverDatabases
+from evf.solver.fov import LEGACY_SOLVER_PARAMS, SolverParams, fov_from_focal_length
+from evf.solver.fov_search import GUESS_FOCAL_LENGTH_MM, FovSearch, guess_fov_from_sensor, step_for
+from evf.solver.thread import SolverThread
+from tests.fov_fakes import (
+    IDS_KEY, IDS_PLAIN_HELLO, IDS_SENSOR_HELLO, NARROW, OV_HELLO, WIDE, FakeDb, FakeSolver,
+    make_profile, valid_result, wait_for,
+)
+
+IDS_SENSOR_MM = 1936 * 5.86 / 1000.0  # 11.35
+
+
+class TestFovSearchPlanning:
+    def test_a_step_uses_the_centre_and_half_the_range(self):
+        assert step_for(NARROW).params == SolverParams(8.5, 1.5)
+        assert step_for(WIDE).params == SolverParams(25.0, 7.0)
+
+    def test_the_guess_is_the_fov_of_a_25_mm_lens(self):
+        assert GUESS_FOCAL_LENGTH_MM == 25.0
+        assert guess_fov_from_sensor(IDS_SENSOR_MM) == pytest.approx(25.6, abs=0.1)
+        assert guess_fov_from_sensor(1280 * 3.0 / 1000) == pytest.approx(8.76, abs=0.1)  # OV9281
+        assert guess_fov_from_sensor(None) is None
+
+    def test_it_starts_with_the_database_that_fits_the_guess(self):
+        assert FovSearch([NARROW, WIDE], 25.6).order == [WIDE, NARROW]
+        assert FovSearch([NARROW, WIDE], 8.8).order == [NARROW, WIDE]
+        assert FovSearch([WIDE, NARROW], None).order == [NARROW, WIDE]  # no guess: narrowest first
+
+    def test_it_alternates_between_the_databases(self):
+        search = FovSearch([NARROW, WIDE], 25.6)
+        names = [search.next_step().database.name for _ in range(5)]
+        assert names == ["wide", "narrow", "wide", "narrow", "wide"]
+
+    def test_it_only_uses_databases_that_are_loaded(self):
+        search = FovSearch([NARROW, WIDE], 25.6)
+        assert {search.next_step([NARROW]).database.name for _ in range(3)} == {"narrow"}
+        assert [s.database.name for s in search.steps([WIDE, NARROW])] == ["wide", "narrow"]
+        assert search.next_step([]).database.name in ("wide", "narrow")  # nothing loaded: try all
+
+    def test_an_empty_registry_is_refused(self):
+        with pytest.raises(ValueError):
+            FovSearch([])
+
+
+class TestHeldDatabases:
+    def _dbs(self):
+        loaded = []
+
+        def loader(path):
+            loaded.append(path.name)
+            return FakeDb(path)
+
+        return SolverDatabases([NARROW, WIDE], 8.86, loader=loader), loaded
+
+    def test_hold_all_loads_the_others_and_release_drops_them(self):
+        dbs, loaded = self._dbs()
+        assert [i.name for i in dbs.loaded()] == ["narrow"]
+        dbs.hold_all()
+        assert [i.name for i in dbs.loaded()] == ["narrow", "wide"]
+        assert dbs.db_for(WIDE) is not None and dbs.db_for(NARROW) is dbs.db
+        assert loaded == ["narrow.bin", "wide.bin"]
+        dbs.hold_all()  # idempotent
+        assert loaded == ["narrow.bin", "wide.bin"]
+        dbs.release_extras()
+        assert [i.name for i in dbs.loaded()] == ["narrow"]
+        assert dbs.db_for(WIDE) is None
+        assert dbs.active.name == "narrow"
+
+    def test_a_failing_load_is_skipped(self, caplog):
+        def loader(path):
+            if path.name == "wide.bin":
+                raise OSError("disk")
+            return FakeDb(path)
+
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=loader)
+        dbs.hold_all()
+        assert [i.name for i in dbs.loaded()] == ["narrow"]
+        assert "Failed to load solver database 'wide'" in caplog.text
+
+    def test_a_swap_still_works_while_holding(self):
+        dbs, _ = self._dbs()
+        dbs.hold_all()
+        dbs.request_for_fov(25.6)
+        assert dbs.apply_pending() is True
+        assert dbs.active.name == "wide"
+        assert dbs.db_for(WIDE) is dbs.db
+
+
+class TestSearchInTheProfile:
+    def _connect(self, tmp_path, solves_on=None, solved_fov=25.6, hello=IDS_SENSOR_HELLO):
+        solver = FakeSolver(solves_on=solves_on, solved_fov=solved_fov)
+        cfg, profile, _box = make_profile(tmp_path, solver)
+        profile.on_camera_connected(hello)
+        return cfg, profile, solver
+
+    def test_a_fresh_profile_with_a_known_sensor_starts_the_search(self, tmp_path):
+        cfg, profile, _solver = self._connect(tmp_path)
+        assert profile.searching is True
+        payload = profile.geometry_payload()
+        assert payload["fov_source"] == "searching"
+        assert payload["fov_h_deg"] == 8.86  # nothing is known yet
+        assert profiles.get_fov(cfg, IDS_KEY) == (None, None)
+
+    def test_the_plans_alternate_and_name_the_database(self, tmp_path):
+        _cfg, profile, solver = self._connect(tmp_path)
+        plans = [profile.plan() for _ in range(4)]
+        assert [p.database.name for p in plans] == ["wide", "narrow", "wide", "narrow"]
+        assert plans[0].params == SolverParams(25.0, 7.0)
+        assert plans[1].params == SolverParams(8.5, 1.5)
+        # The search holds both databases for its duration.
+        assert [i.name for i in solver.databases.loaded()] == ["narrow", "wide"]
+
+    def test_the_first_valid_solve_fixes_the_database_and_stores_the_fov(self, tmp_path):
+        cfg, profile, solver = self._connect(tmp_path, solved_fov=25.7)
+        profile.solve_failed()
+        plan = profile.plan()
+        profile.solve_succeeded(valid_result(25.7), plan)
+        assert profile.searching is False
+        assert profiles.get_fov(cfg, IDS_KEY) == (25.7, "learned")
+        assert profile.params.get() == SolverParams(25.7, pytest.approx(2.57))
+        assert profile.params.resolved.source == "learned"
+        assert profile.geometry_payload()["fov_source"] == "learned"
+        # the wide database is requested, the extra one is released
+        assert solver.apply_pending_database() is True
+        assert solver.databases.active.name == "wide"
+        assert [i.name for i in solver.databases.loaded()] == ["wide"]
+        assert profile.plan() == SolvePlan(profile.params.get(), None)
+
+    def test_a_narrow_field_is_found_with_the_narrow_database(self, tmp_path):
+        cfg, profile, solver = self._connect(tmp_path)
+        profile.solve_succeeded(valid_result(8.7), SolvePlan(SolverParams(8.5, 1.5), NARROW))
+        assert profiles.get_fov(cfg, IDS_KEY) == (8.7, "learned")
+        assert solver.apply_pending_database() is False  # narrow stays
+        assert solver.databases.active.name == "narrow"
+        assert [i.name for i in solver.databases.loaded()] == ["narrow"]
+
+    def test_a_valid_solve_without_fov_deg_does_not_end_the_search(self, tmp_path):
+        cfg, profile, _solver = self._connect(tmp_path)
+        profile.solve_succeeded(valid_result(None), profile.plan())
+        assert profile.searching is True
+        assert profiles.get_fov(cfg, IDS_KEY) == (None, None)
+
+    def test_the_stored_fov_is_used_at_the_next_start_without_search(self, tmp_path):
+        cfg, profile, _solver = self._connect(tmp_path)
+        profile.solve_succeeded(valid_result(25.7), profile.plan())
+        solver2 = FakeSolver()
+        cfg2 = ConfigManager(config_dir=cfg.path.parent)
+        profile2 = make_profile(tmp_path, solver2, name="cfg")[1]
+        profile2.on_camera_connected(IDS_SENSOR_HELLO)
+        assert profile2.searching is False
+        assert profile2.params.resolved.fov_h_deg == 25.7
+        assert cfg2.get("camera", "profiles")[IDS_KEY]["fov_source"] == "learned"
+
+    def test_learning_takes_over_after_the_search(self, tmp_path):
+        cfg, profile, solver = self._connect(tmp_path)
+        profile.solve_succeeded(valid_result(25.0), profile.plan())
+        solver.apply_pending_database()  # the solver thread swaps to the wide database between solves
+        for _ in range(5):
+            profile.solve_succeeded(valid_result(26.0), profile.plan())
+        assert profiles.get_fov(cfg, IDS_KEY) == (26.0, "learned")
+
+    # -- the upstream camera keeps today's behaviour --------------------------------
+
+    @pytest.mark.parametrize("hello", [OV_HELLO, IDS_PLAIN_HELLO], ids=["upstream", "no-sensor"])
+    def test_no_sensor_in_hello_means_no_search(self, tmp_path, hello):
+        _cfg, profile, solver = self._connect(tmp_path, hello=hello)
+        assert profile.searching is False
+        assert profile.params.get() == LEGACY_SOLVER_PARAMS
+        assert profile.plan() == SolvePlan(LEGACY_SOLVER_PARAMS, None)
+        assert profile.geometry_payload()["fov_source"] == "default"
+        assert [i.name for i in solver.databases.loaded()] == ["narrow"]  # nothing extra loaded
+
+    def test_a_stored_fov_means_no_search(self, tmp_path):
+        solver = FakeSolver()
+        cfg, profile, _box = make_profile(tmp_path, solver)
+        profiles.set_fov(cfg, IDS_KEY, 25.6, "user")
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        assert profile.searching is False
+        assert profile.plan().database is None
+
+    def test_without_a_solver_there_is_no_search(self, tmp_path):
+        _cfg, profile, _box = make_profile(tmp_path, None)
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        assert profile.searching is False
+
+    def test_a_single_database_registry_has_nothing_to_search(self, tmp_path):
+        solver = FakeSolver()
+        solver.databases = SolverDatabases([NARROW], 8.86, loader=FakeDb)
+        _cfg, profile, _box = make_profile(tmp_path, solver)
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        assert profile.searching is False
+
+    # -- ending the search other ways --------------------------------------------------
+
+    def test_entering_a_focal_length_ends_the_search(self, tmp_path):
+        cfg, profile, solver = self._connect(tmp_path)
+        profile.plan()  # holds both
+        profile.set_user_fov(focal_length_mm=25)
+        assert profile.searching is False
+        assert profiles.get_fov(cfg, IDS_KEY) == (pytest.approx(fov_from_focal_length(25, IDS_SENSOR_MM)), "user")
+        assert [i.name for i in solver.databases.loaded()] == ["narrow", "wide"]  # wide kept for the pending swap
+        assert solver.apply_pending_database() is True
+        assert solver.databases.active.name == "wide"
+        assert [i.name for i in solver.databases.loaded()] == ["wide"]  # narrow dropped
+
+    def test_reset_starts_the_search_again(self, tmp_path):
+        cfg, profile, _solver = self._connect(tmp_path)
+        profile.set_user_fov(focal_length_mm=25)
+        assert profile.searching is False
+        profile.set_user_fov(reset=True)
+        assert profile.searching is True
+        assert profiles.get_fov(cfg, IDS_KEY) == (None, None)
+        assert profile.geometry_payload()["fov_source"] == "searching"
+
+    def test_the_camera_going_away_stops_the_search(self, tmp_path):
+        _cfg, profile, solver = self._connect(tmp_path)
+        profile.plan()
+        profile.on_camera_gone()
+        assert profile.searching is False
+        assert [i.name for i in solver.databases.loaded()] == ["narrow"]
+
+    def test_another_camera_connecting_restarts_from_its_own_profile(self, tmp_path):
+        cfg, profile, _solver = self._connect(tmp_path)
+        profile.on_camera_connected(OV_HELLO)
+        assert profile.searching is False
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        assert profile.searching is True
+
+
+class TestSyncSolveDuringSearch:
+    def test_the_sync_solve_tries_each_database_until_one_solves(self, tmp_path):
+        solver = FakeSolver(solves_on="narrow", solved_fov=8.7)
+        cfg, profile, _box = make_profile(tmp_path, solver)
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        result = profile.solve_for_sync(solver, b"frame")
+        assert [c[0] for c in solver.calls] == ["wide", "narrow"]  # guess first, then the other
+        assert result["fov_deg"] == 8.7
+        assert profiles.get_fov(cfg, IDS_KEY) == (8.7, "learned")
+        assert profile.searching is False
+
+    def test_a_failing_sync_solve_keeps_searching(self, tmp_path):
+        solver = FakeSolver(solves_on=None)
+        cfg, profile, _box = make_profile(tmp_path, solver)
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        result = profile.solve_for_sync(solver, b"frame")
+        assert result["RA"] is None
+        assert len(solver.calls) == 2
+        assert profile.searching is True
+
+    def test_without_a_search_it_is_one_solve_with_the_profile_fov(self, tmp_path):
+        solver = FakeSolver()
+        cfg, profile, _box = make_profile(tmp_path, solver)
+        profiles.set_fov(cfg, IDS_KEY, 25.6, "user")
+        profile.on_camera_connected(IDS_PLAIN_HELLO)
+        solver.apply_pending_database()
+        profile.solve_for_sync(solver, b"frame")
+        assert solver.calls == [("wide", 25.6, pytest.approx(2.56))]
+
+    def test_the_engine_sync_step_uses_the_search(self, tmp_path):
+        cfg = ConfigManager(config_dir=tmp_path)
+        eng = Engine(config=cfg)
+        eng._solver = FakeSolver(solves_on="wide", solved_fov=25.5)
+        eng._fork_camera_connected(IDS_SENSOR_HELLO)
+        eng._frame_buffer.set(b"frame", time.monotonic(), 1)
+        eng._sync_lock.acquire()
+        eng._perform_sync_solve()  # no candidates in the fake result: fails after the solve
+        assert profiles.get_fov(cfg, IDS_KEY) == (25.5, "learned")
+        assert eng._solver.databases.active.name == "narrow"  # the swap is the next apply
+
+
+class TestSolverThreadSearch:
+    def test_the_thread_searches_and_ends_on_the_database_that_solves(self, tmp_path):
+        solver = FakeSolver(solves_on="wide", solved_fov=25.6)
+        cfg, profile, _box = make_profile(tmp_path, solver)
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        fb, sm = LatestFrame(), StateMachine()
+        st = SolverThread(solver, fb, PointingState(), sm, ConfigManager(config_dir=tmp_path / "tcfg"),
+                          solver_params=profile.params, fov_tracker=profile)
+        sm.transition(EngineState.SYNC)
+        sm.transition(EngineState.SYNC_CONFIRM)
+        st.start()
+        try:
+            for i in range(1, 30):
+                fb.set(b"frame", time.monotonic(), i)
+                if wait_for(lambda: not profile.searching, timeout=0.1):
+                    break
+            assert profile.searching is False
+            assert profiles.get_fov(cfg, IDS_KEY) == (25.6, "learned")
+            assert wait_for(lambda: solver.databases.active.name == "wide")  # the thread swapped
+            assert wait_for(lambda: sm.state == EngineState.TRACKING)
+        finally:
+            st.stop()
+        # It tried the wide database first (the sensor guess), solved on it at once.
+        assert solver.calls[0] == ("wide", 25.0, 7.0)
+
+    def test_a_search_that_never_solves_keeps_alternating_and_changes_nothing(self, tmp_path):
+        solver = FakeSolver(solves_on=None)
+        cfg, profile, _box = make_profile(tmp_path, solver)
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        fb, sm = LatestFrame(), StateMachine()
+        st = SolverThread(solver, fb, PointingState(), sm, ConfigManager(config_dir=tmp_path / "tcfg"),
+                          solver_params=profile.params, fov_tracker=profile)
+        sm.transition(EngineState.SYNC)
+        sm.transition(EngineState.SYNC_CONFIRM)
+        st.start()
+        try:
+            for i in range(1, 7):
+                fb.set(b"frame", time.monotonic(), i)
+                wait_for(lambda i=i: len(solver.calls) >= i, timeout=2)
+        finally:
+            st.stop()
+        assert [c[0] for c in solver.calls[:6]] == ["wide", "narrow"] * 3
+        assert profile.searching is True
+        assert profiles.get_fov(cfg, IDS_KEY) == (None, None)
+
+
+class TestHeldDatabasesAcrossSwaps:
+    """Review fix: a swap during a search must not load twice or lose a database."""
+
+    def _dbs(self, fov):
+        loads = []
+
+        def loader(path):
+            loads.append(path.name)
+            return FakeDb(path)
+
+        return SolverDatabases([NARROW, WIDE], fov, loader=loader), loads
+
+    def test_reset_while_wide_is_active_loads_each_database_once(self):
+        dbs, loads = self._dbs(25.6)          # user had 25 mm: wide active
+        dbs.request_for_fov(8.86)             # Reset: narrow wanted
+        assert dbs.hold_all() is True         # the search's first frame
+        assert dbs.apply_pending() is True    # the swap that Reset asked for
+        assert sorted(loads) == ["narrow.bin", "wide.bin"]   # one load per database
+        assert dbs.active.name == "narrow"
+        assert [i.name for i in dbs.loaded()] == ["narrow", "wide"]   # the search still has both
+        assert FovSearch(dbs.registry, 25.6).next_step(dbs.loaded()).database.name == "wide"
+
+    def test_swap_before_the_search_starts_then_hold(self):
+        dbs, loads = self._dbs(25.6)
+        dbs.request_for_fov(8.86)
+        dbs.apply_pending()
+        dbs.hold_all()
+        assert [i.name for i in dbs.loaded()] == ["narrow", "wide"]
+
+    def test_without_a_search_the_old_database_is_dropped_as_before(self):
+        dbs, _loads = self._dbs(25.6)
+        dbs.request_for_fov(8.86)
+        dbs.apply_pending()
+        assert [i.name for i in dbs.loaded()] == ["narrow"]
+
+    def test_the_end_of_a_search_keeps_the_database_the_swap_wants(self):
+        dbs, loads = self._dbs(8.86)
+        dbs.hold_all()
+        dbs.request_for_fov(25.6)             # search found 25.6 deg
+        dbs.release_extras()                  # ... and ends
+        assert [i.name for i in dbs.loaded()] == ["narrow", "wide"]  # wide kept for the swap
+        before = list(loads)
+        assert dbs.apply_pending() is True
+        assert loads == before                # wide was not loaded again
+        assert dbs.active.name == "wide"
+        assert [i.name for i in dbs.loaded()] == ["wide"]
+
+    def test_hold_all_reports_a_failed_load(self):
+        calls = {"n": 0}
+
+        def loader(path):
+            if path.name == "wide.bin":
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise OSError("disk")
+            return FakeDb(path)
+
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=loader)
+        assert dbs.hold_all() is False
+        assert dbs.hold_all() is True         # the retry works
+        assert [i.name for i in dbs.loaded()] == ["narrow", "wide"]
+
+
+class TestSearchLoading:
+    def _connect(self, tmp_path, solver):
+        cfg, profile, _box = make_profile(tmp_path, solver)
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        return cfg, profile
+
+    def test_a_failed_load_is_retried_on_the_next_plan(self, tmp_path):
+        solver = FakeSolver()
+        attempts = {"n": 0}
+        real = solver.databases._loader
+
+        def flaky(path):
+            if path.name == "wide.bin":
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    raise OSError("disk")
+            return real(path)
+
+        solver.databases._loader = flaky
+        _cfg, profile = self._connect(tmp_path, solver)
+        assert {profile.plan().database.name for _ in range(2)} == {"narrow"}   # wide missing
+        profile.plan()
+        assert [i.name for i in solver.databases.loaded()] == ["narrow", "wide"]
+        assert {profile.plan().database.name for _ in range(2)} == {"wide", "narrow"}
+
+    def test_the_profile_lock_is_not_held_while_a_database_loads(self, tmp_path):
+        import threading
+        solver = FakeSolver()
+        gate, entered = threading.Event(), threading.Event()
+        real = solver.databases._loader
+
+        def slow(path):
+            if path.name == "wide.bin":
+                entered.set()
+                assert gate.wait(5)
+            return real(path)
+
+        solver.databases._loader = slow
+        _cfg, profile = self._connect(tmp_path, solver)
+        t = threading.Thread(target=profile.plan)
+        t.start()
+        try:
+            assert entered.wait(5)
+            done = threading.Event()
+            threading.Thread(target=lambda: (profile.camera_info(), done.set())).start()
+            assert done.wait(2), "camera_info() (/ws) blocked behind the database load"
+        finally:
+            gate.set()
+            t.join(5)
+
+    def test_a_search_that_ended_during_the_load_releases_what_it_loaded(self, tmp_path):
+        import threading
+        solver = FakeSolver()
+        gate, entered = threading.Event(), threading.Event()
+        real = solver.databases._loader
+
+        def slow(path):
+            if path.name == "wide.bin":
+                entered.set()
+                assert gate.wait(5)
+            return real(path)
+
+        solver.databases._loader = slow
+        _cfg, profile = self._connect(tmp_path, solver)
+        t = threading.Thread(target=profile.plan)
+        t.start()
+        assert entered.wait(5)
+        profile.set_user_fov(fov_h_deg=8.7)   # ends the search mid-load
+        gate.set()
+        t.join(5)
+        assert [i.name for i in solver.databases.loaded()] == ["narrow"]
+
+    def test_the_sync_solve_skips_a_database_released_meanwhile(self, tmp_path):
+        from evf.solver.databases import DatabaseNotLoaded
+        solver = FakeSolver(solves_on="narrow", solved_fov=8.7)
+        _cfg, profile = self._connect(tmp_path, solver)
+        real = solver.solve_frame
+
+        def solve(image, est, err, database=None):
+            if database is not None and database.name == "wide":
+                raise DatabaseNotLoaded("solver database 'wide' is not loaded")
+            return real(image, est, err, database=database)
+
+        solver.solve_frame = solve
+        result = profile.solve_for_sync(solver, b"frame")
+        assert result["fov_deg"] == 8.7       # no raw error; the other database solved
+
+    def test_the_sync_solve_with_nothing_loaded_fails_quietly(self, tmp_path):
+        from evf.solver.databases import DatabaseNotLoaded
+        solver = FakeSolver()
+        _cfg, profile = self._connect(tmp_path, solver)
+
+        def solve(image, est, err, database=None):
+            raise DatabaseNotLoaded("gone")
+
+        solver.solve_frame = solve
+        result = profile.solve_for_sync(solver, b"frame")
+        assert not FakeSolver.is_valid(result)
+
+
+class TestSearchEndsWhileLoading:
+    """Re-review fixes: a search that ends or is replaced while a database loads."""
+
+    @staticmethod
+    def _profile(tmp_path, gate=None):
+        import threading
+        loads, entered = [], threading.Event()
+
+        def loader(path):
+            loads.append(path.name)
+            if gate is not None and path.name == "wide.bin" and loads.count("wide.bin") == 1:
+                entered.set()
+                assert gate.wait(5)
+            return FakeDb(path)
+
+        solver = FakeSolver()
+        solver.databases = SolverDatabases([NARROW, WIDE], 8.86, loader=loader)
+        cfg, profile, _box = make_profile(tmp_path, solver)
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        return solver, profile, loads, entered
+
+    @pytest.mark.parametrize("user_fov,db_after", [(8.5, "narrow"), (25.6, "wide")])
+    def test_two_callers_do_not_load_the_same_database_twice(self, tmp_path, user_fov, db_after):
+        import threading
+        gate = threading.Event()
+        solver, profile, loads, entered = self._profile(tmp_path, gate)
+        threads = [threading.Thread(target=profile.plan) for _ in range(2)]
+        for t in threads:
+            t.start()
+        assert entered.wait(5)
+        assert wait_for(lambda: True, 0.1)  # let the second caller queue on the load lock
+        profile.set_user_fov(fov_h_deg=user_fov)  # the search ends mid-load
+        gate.set()
+        for t in threads:
+            t.join(5)
+        solver.databases.apply_pending()
+        assert solver.databases.active.name == db_after
+        assert loads.count("wide.bin") == 1                # never twice (kept for the swap if wanted)
+        assert loads.count("narrow.bin") == 1
+        assert [i.name for i in solver.databases.loaded()] == [db_after]
+        assert not solver.databases.holding
+
+    def test_a_stale_load_does_not_disarm_the_next_search(self, tmp_path):
+        import threading
+        gate = threading.Event()
+        solver, profile, loads, entered = self._profile(tmp_path, gate)
+        db = solver.databases
+        a = threading.Thread(target=profile.plan)          # search S1 loads wide ...
+        a.start()
+        assert entered.wait(5)
+        profile.set_user_fov(fov_h_deg=8.5)                # ... S1 ends,
+        profile.set_user_fov(reset=True)                   # S2 starts
+        assert profile.searching
+        b = threading.Thread(target=profile.plan)          # S2's first frame
+        b.start()
+        assert wait_for(lambda: db.holding)
+        gate.set()
+        a.join(5)
+        b.join(5)
+        assert profile.searching and db.holding
+        assert [i.name for i in db.loaded()] == ["narrow", "wide"]
+        assert {profile.plan().database.name for _ in range(4)} == {"narrow", "wide"}
+        assert loads.count("wide.bin") == 1
+
+    def test_the_holding_is_re_armed_when_it_was_cleared_under_a_running_search(self, tmp_path):
+        solver, profile, loads, _entered = self._profile(tmp_path)
+        profile.plan()
+        solver.databases.release_extras()                  # a stale caller released it
+        assert {profile.plan().database.name for _ in range(4)} == {"narrow", "wide"}
+        assert solver.databases.holding
+        assert loads.count("wide.bin") == 2                # loaded again after the release, once
+
+
+class TestKeptCopyDoesNotLeak:
+    def test_a_later_request_for_the_active_database_drops_the_kept_copy(self):
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=FakeDb)
+        dbs.hold_all()
+        dbs.request_for_fov(25.6)
+        dbs.release_extras()                               # wide kept for the pending swap
+        assert list(dbs._extras) == ["wide"]
+        dbs.request_for_fov(8.86)                          # the swap is no longer wanted
+        assert list(dbs._extras) == []
+        assert [i.name for i in dbs.loaded()] == ["narrow"]
+
+    def test_a_request_during_the_search_keeps_the_held_databases(self):
+        dbs = SolverDatabases([NARROW, WIDE], 8.86, loader=FakeDb)
+        dbs.hold_all()
+        dbs.request_for_fov(8.86)
+        assert [i.name for i in dbs.loaded()] == ["narrow", "wide"]
+
+    def test_found_wide_then_the_user_enters_50_mm_before_the_swap(self, tmp_path):
+        solver = FakeSolver(solves_on="wide", solved_fov=25.6)
+        _cfg, profile, _box = make_profile(tmp_path, solver)
+        profile.on_camera_connected(IDS_SENSOR_HELLO)
+        profile.solve_for_sync(solver, b"frame")           # found wide; the swap is pending
+        assert [i.name for i in solver.databases.loaded()] == ["narrow", "wide"]
+        profile.set_user_fov(focal_length_mm=50)           # 13 deg: closest is the active narrow
+        solver.databases.apply_pending()
+        assert solver.databases._extras == {}
+        profile.on_camera_connected(IDS_SENSOR_HELLO)      # reconnect
+        assert solver.databases._extras == {}

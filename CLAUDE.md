@@ -123,7 +123,9 @@ python/evf/                     # main Python package
     solver.py                   # solver wrapper
     thread.py                   # solver worker thread
     databases.py                # fork: solver-database registry, selection, swap (narrow/wide)
-    fov.py                      # fork: solver FOV parameters (SolverParams), FOV resolution, SolverParamsHolder
+    fov.py                      # fork: solver FOV parameters (SolverParams), FOV resolution, SolverParamsHolder, lens maths
+    fov_learning.py             # fork: FOV learning (median of 5 solves, range / step guards)
+    fov_search.py               # fork: FOV search for a profile without a FOV (alternates the databases)
     sync.py                     # multi-star sync / calibration
   stellarium/                   # Stellarium telescope protocol server
     server.py                   # TCP server for Stellarium connection
@@ -270,8 +272,12 @@ range contains the FOV, and keeps only one loaded; a swap runs on the solver thr
 `camera.last_camera_key` at startup and requests the right one on camera connect, and passes
 `fov` / `max(1.5, 0.10 * fov)` to `PlateSolver.solve_frame(image, fov_estimate_deg, fov_max_error_deg)`
 through a lock-protected `SolverParams` holder. With no profile FOV it is today's behaviour: the narrow
-database, 8.86 deg / 1.5 deg, 1280x720. Until the Settings field exists (spec slice S2) enter the FOV by
-hand, see `docs/hardware.md`.
+database, 8.86 deg / 1.5 deg, 1280x720. The Settings panel shows the camera, the FOV with its source
+(user / learned / searching / default), the loaded database and a focal-length field (`POST /api/camera/fov`,
+`CameraProfile.set_user_fov()`). A camera whose HELLO carries a sensor size (the C# server) and whose profile has
+no FOV runs the FOV search (`evf.solver.fov_search`, both databases held while it runs) and then learns the FOV
+(`evf.solver.fov_learning`); other cameras keep the legacy FOV and learn nothing. `docs/hardware.md` also
+describes entering the FOV by hand.
 
 ## Architecture Rules
 

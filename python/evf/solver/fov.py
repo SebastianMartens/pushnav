@@ -10,8 +10,12 @@
 * ``SolverParamsHolder``: the engine-owned, lock-protected current value that
   the solver thread reads at the start of every solve.
 
-FOV from a focal length, learning and FOV search (spec 5.2 steps 2 and 3,
-5.2.2, 5.4.4) are added here later.
+* ``sensor_width_mm`` / ``fov_from_focal_length`` / ``focal_length_from_fov``:
+  the lens data path of spec 5.2 step 2.
+
+Learning (5.2.2) and FOV search (5.4.4) are in ``fov_learning.py`` and
+``fov_search.py``: both need the active database's range, and
+``databases.py`` imports this module.
 """
 
 from __future__ import annotations
@@ -146,3 +150,44 @@ class SolverParamsHolder:
             self._resolved = resolved
             self._params = params
         return params
+
+
+# -- Lens data (spec 5.2 step 2) ------------------------------------------------
+
+
+def sensor_width_mm(hello: object) -> float | None:
+    """Physical sensor width from HELLO ``capabilities.sensor``, or None if unknown.
+
+    ``width`` (pixels) x ``pixel_size_um`` / 1000. None when the camera server
+    does not send a sensor (every server but the C# one) or no pixel pitch (UVC).
+    """
+    if not isinstance(hello, dict):
+        return None
+    capabilities = hello.get("capabilities")
+    sensor = capabilities.get("sensor") if isinstance(capabilities, dict) else None
+    if not isinstance(sensor, dict):
+        return None
+    width, pitch = sensor.get("width"), sensor.get("pixel_size_um")
+    if any(isinstance(v, bool) or not isinstance(v, numbers.Real) for v in (width, pitch)):
+        return None
+    result = float(width) * float(pitch) / 1000.0  # type: ignore[arg-type]
+    return result if math.isfinite(result) and result > 0.0 else None
+
+
+def fov_from_focal_length(focal_length_mm: object, sensor_width_mm_: float) -> float:
+    """Horizontal FOV in degrees: ``2 * atan(sensor_width / (2 * f))``.
+
+    Raises ``ValueError`` for a focal length that is not a finite positive number
+    or that gives a FOV of 180 deg or more.
+    """
+    if isinstance(focal_length_mm, bool) or not isinstance(focal_length_mm, numbers.Real):
+        raise ValueError(f"focal length must be a number, got {focal_length_mm!r}")
+    f = float(focal_length_mm)
+    if not math.isfinite(f) or f <= 0.0:
+        raise ValueError(f"focal length must be a finite number > 0 mm, got {focal_length_mm!r}")
+    return validate_fov(math.degrees(2.0 * math.atan(sensor_width_mm_ / (2.0 * f))))
+
+
+def focal_length_from_fov(fov_h_deg: float, sensor_width_mm_: float) -> float:
+    """Inverse of :func:`fov_from_focal_length`, for showing the lens in Settings."""
+    return sensor_width_mm_ / (2.0 * math.tan(math.radians(validate_fov(fov_h_deg)) / 2.0))
