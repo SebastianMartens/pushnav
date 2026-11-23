@@ -15,8 +15,11 @@ Rules:
   range is used and the selection is flagged ``in_range=False``.
 * Only one database is loaded at a time (RAM matters on a Pi). A swap is
   requested from any thread with :meth:`SolverDatabases.request_for_fov` and carried
-  out by :meth:`SolverDatabases.apply_pending` **on the solver thread**,
-  between two solves: the old database is dropped once the new one loaded.
+  out by :meth:`SolverDatabases.apply_pending`, normally on the solver thread
+  between two solves; the engine also calls it when no solver thread is
+  running (camera connect, sync solve). Callers are serialised by a load lock,
+  so two of them never load at the same time: the old database is dropped
+  once the new one loaded.
 """
 
 from __future__ import annotations
@@ -210,6 +213,9 @@ class SolverDatabases:
         self._registry = sorted(registry, key=lambda i: (i.width_deg, i.name))
         self._loader = loader
         self._lock = threading.Lock()
+        # Held for a whole swap: two callers must not load the same file at once
+        # (peak RAM). Never taken while holding _lock; _lock is only held briefly.
+        self._load_lock = threading.Lock()
         selection = select_database(self._registry, initial_fov_deg)
         self._active = selection.info
         self._db = self._load(selection.info)
@@ -275,12 +281,21 @@ class SolverDatabases:
         return selection
 
     def apply_pending(self) -> bool:
-        """Load a requested database and drop the old one. Solver thread only.
+        """Load a requested database and drop the old one.
+
+        Called by the solver thread between two solves, and by the engine when
+        no solver thread runs. Safe from several threads: callers queue on a
+        load lock and re-check what is wanted once they hold it, so a second
+        caller finds the swap done and loads nothing.
 
         Returns True if the active database changed. A load failure keeps the
         old database (ERROR logged) and does not raise, so the solver thread
         survives it; the failed target is not retried until the next request.
         """
+        with self._load_lock:
+            return self._apply_pending_locked()
+
+    def _apply_pending_locked(self) -> bool:
         with self._lock:
             pending = self._wanted
             if pending == self._active or pending == self._failed:
