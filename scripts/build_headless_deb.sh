@@ -142,6 +142,8 @@ find "$APP/python" -name __pycache__ -type d -prune -exec rm -rf {} +
 # -------------------------------------------------------------------------
 echo "==> Copying data"
 cp data/tetra3rs_gaia.bin data/VERSION.json "$APP/data/"
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+cp data/tetra3rs_gaia_wide.bin data/solver_dbs.json "$APP/data/"
 cp -a data/sounds "$APP/data/sounds"
 cp -a tests/samples "$APP/data/samples"
 cp marketing/inapp-title.png "$APP/marketing/"

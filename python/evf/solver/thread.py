@@ -31,6 +31,8 @@ from evf.engine.pointing import PointingState
 from evf.engine.state import EngineState, InvalidTransitionError, StateMachine
 from evf.engine.navigation import angular_separation, sky_position_angle
 from evf.solver.solver import PlateSolver
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+from evf.solver.fov import LEGACY_SOLVER_PARAMS
 from evf.solver.sync import apply_body_frame_sync
 
 logger = logging.getLogger(__name__)
@@ -206,6 +208,9 @@ class SolverThread:
                 )
                 return
 
+            # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+            self._solver.apply_pending_database()  # DB swaps happen here, between solves
+
             jpeg_bytes, _timestamp, frame_id = self._frame_buffer.get()
             if jpeg_bytes is None or frame_id == last_frame_id:
                 time.sleep(0.01)
@@ -215,7 +220,11 @@ class SolverThread:
 
             try:
                 t_start = time.monotonic()
-                result = self._solver.solve_frame(jpeg_bytes)
+                result = self._solver.solve_frame(
+                    jpeg_bytes,
+                    LEGACY_SOLVER_PARAMS.fov_estimate_deg,  # fork: camera-controls
+                    LEGACY_SOLVER_PARAMS.fov_max_error_deg,
+                )
                 t_total = (time.monotonic() - t_start) * 1000
                 logger.debug(
                     "Solve frame %d: %.0fms (extract=%.0fms solve=%.0fms)",

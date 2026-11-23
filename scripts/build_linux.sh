@@ -119,6 +119,8 @@ chmod +x "$APP_DIR/camera_server"
 
 # Copy data resources
 cp "$REPO_ROOT/data/tetra3rs_gaia.bin" "$APP_DIR/data/"
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+cp "$REPO_ROOT/data/tetra3rs_gaia_wide.bin" "$REPO_ROOT/data/solver_dbs.json" "$APP_DIR/data/"
 cp "$REPO_ROOT/data/VERSION.json" "$APP_DIR/data/"
 cp -a "$REPO_ROOT/data/sounds" "$APP_DIR/data/sounds"
 

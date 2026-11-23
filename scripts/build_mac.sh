@@ -149,6 +149,8 @@ cp "$CAMERA_BIN" "$MACOS/camera_server"
 chmod +x "$MACOS/camera_server"
 
 cp "$REPO_ROOT/data/tetra3rs_gaia.bin" "$RESOURCES/"
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+cp "$REPO_ROOT/data/tetra3rs_gaia_wide.bin" "$REPO_ROOT/data/solver_dbs.json" "$RESOURCES/"
 cp "$REPO_ROOT/data/VERSION.json" "$RESOURCES/"
 cp -a "$REPO_ROOT/data/sounds"      "$RESOURCES/sounds"
 cp -a "$REPO_ROOT/web/dist"         "$RESOURCES/web_dist"

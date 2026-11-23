@@ -41,6 +41,8 @@ from evf.engine.sample_injector import SampleInjector
 from evf.engine.state import EngineState, StateMachine
 from evf.engine.status_led import StatusLedController, find_leds
 from evf.solver.solver import PlateSolver
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+from evf.solver.fov import LEGACY_SOLVER_PARAMS
 import numpy as np
 
 from evf.solver.sync import (
@@ -831,7 +833,11 @@ class Engine:
             if frame_data is None:
                 self._sync_error = "No camera frame available"
                 return
-            result = self._solver.solve_frame(frame_data)
+            result = self._solver.solve_frame(
+                frame_data,
+                LEGACY_SOLVER_PARAMS.fov_estimate_deg,  # fork: camera-controls
+                LEGACY_SOLVER_PARAMS.fov_max_error_deg,
+            )
             if not PlateSolver.is_valid(
                 result, self._config.min_matches, self._config.max_prob
             ):

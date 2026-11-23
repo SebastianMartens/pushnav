@@ -46,6 +46,10 @@ set -euo pipefail
 apt-get update -qq >/dev/null
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl "/deb/$DEB_NAME" >/tmp/apt.log 2>&1 \
     || { tail -30 /tmp/apt.log; exit 1; }
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+for f in tetra3rs_gaia.bin tetra3rs_gaia_wide.bin solver_dbs.json; do
+    [ -f "/usr/lib/pushnav-headless/data/$f" ] || { echo "FAIL: $f missing from the package"; exit 1; }
+done
 id -nG pushnav | grep -qw video || { echo "FAIL: pushnav not in video"; exit 1; }
 su -s /bin/sh pushnav -c 'cd /var/lib && HOME=/tmp XDG_CONFIG_HOME=/tmp/c XDG_STATE_HOME=/tmp/s pushnav-headless' \
     >/tmp/run.log 2>&1 &
@@ -57,6 +61,8 @@ for _ in $(seq 1 60); do
 done
 echo "  /api/version: ${version:-<no response>}"
 grep -q "tetra3rs database loaded" /tmp/run.log || { echo "FAIL: star database not loaded"; tail -30 /tmp/run.log; exit 1; }
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md): loaded through the registry
+grep -q "tetra3rs_gaia.bin \[narrow\]" /tmp/run.log || { echo "FAIL: narrow database not loaded via solver_dbs.json"; tail -30 /tmp/run.log; exit 1; }
 if grep -q Traceback /tmp/run.log; then echo "FAIL: traceback in log"; tail -40 /tmp/run.log; exit 1; fi
 case "$version" in *'"app": "pushnav"'*) ;; *) echo "FAIL: /api/version"; tail -30 /tmp/run.log; exit 1 ;; esac
 EOF

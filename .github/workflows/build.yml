@@ -37,7 +37,7 @@ jobs:
       - name: Verify required files
         run: |
           missing=()
-          for f in data/tetra3rs_gaia.bin data/VERSION.json marketing/logo.png marketing/inapp-title.png; do
+          for f in data/tetra3rs_gaia.bin data/tetra3rs_gaia_wide.bin data/solver_dbs.json data/VERSION.json marketing/logo.png marketing/inapp-title.png; do
             [ -f "$f" ] || missing+=("$f")
           done
           if [ ${#missing[@]} -gt 0 ]; then
@@ -127,7 +127,7 @@ jobs:
       - name: Verify required files
         run: |
           missing=()
-          for f in data/tetra3rs_gaia.bin data/VERSION.json marketing/logo.png marketing/inapp-title.png; do
+          for f in data/tetra3rs_gaia.bin data/tetra3rs_gaia_wide.bin data/solver_dbs.json data/VERSION.json marketing/logo.png marketing/inapp-title.png; do
             [ -f "$f" ] || missing+=("$f")
           done
           if [ ${#missing[@]} -gt 0 ]; then
@@ -233,7 +233,7 @@ jobs:
       - name: Verify required files
         run: |
           missing=()
-          for f in data/tetra3rs_gaia.bin data/VERSION.json marketing/inapp-title.png; do
+          for f in data/tetra3rs_gaia.bin data/tetra3rs_gaia_wide.bin data/solver_dbs.json data/VERSION.json marketing/inapp-title.png; do
             [ -f "$f" ] || missing+=("$f")
           done
           if [ ${#missing[@]} -gt 0 ]; then
@@ -301,6 +301,8 @@ jobs:
         run: |
           $required = @(
             "data/tetra3rs_gaia.bin",
+            "data/tetra3rs_gaia_wide.bin",
+            "data/solver_dbs.json",
             "data/VERSION.json",
             "marketing/logo.ico",
             "marketing/inapp-title.png"
@@ -342,6 +344,15 @@ jobs:
         # via pywebview's WinForms backend.
         run: uv sync
 
+      # C# camera server (Native AOT), built by build_windows.bat Phase 1a.
+      # Without a dotnet CLI that phase only warns and skips, so this job
+      # must provide the SDK (version from global.json) and then verify the exe.
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: camera/windows-dotnet/global.json
+
+      # Also the MSVC linker that Native AOT needs (same as test.yml).
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
@@ -361,6 +372,16 @@ jobs:
         # Nuitka standalone, release dir assembly, zip, Inno Setup installer.
         shell: cmd
         run: scripts\build_windows.bat
+
+      - name: Verify C# camera server in release dir
+        # build_windows.bat only warns when the C# server is skipped, so fail here.
+        shell: pwsh
+        run: |
+          $exe = "build/PushNav-windows/camera_server_dotnet.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "Required file missing from the release dir: $exe"
+            exit 1
+          }
 
       - name: Upload zip artifact
         uses: actions/upload-artifact@v4

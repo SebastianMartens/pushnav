@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "databases": [
+    {
+      "name": "narrow",
+      "file": "tetra3rs_gaia.bin",
+      "min_fov_deg": 7.0,
+      "max_fov_deg": 10.0,
+      "star_max_magnitude": 8.0,
+      "pattern_max_error": 0.005,
+      "verification_stars_per_fov": 30,
+      "epoch_proper_motion_year": 2026.0,
+      "num_stars": 62793,
+      "num_patterns": 1914984,
+      "size_bytes": 52769165,
+      "sha256": "0fbb55d9d9e469bcbb86b9e2205eebd4ccc901b0023da54136f9a49eb96e36e5"
+    },
+    {
+      "name": "wide",
+      "file": "tetra3rs_gaia_wide.bin",
+      "min_fov_deg": 18.0,
+      "max_fov_deg": 32.0,
+      "star_max_magnitude": 7.0,
+      "pattern_max_error": 0.005,
+      "verification_stars_per_fov": 30,
+      "epoch_proper_motion_year": 2026.0,
+      "num_stars": 21399,
+      "num_patterns": 348742,
+      "size_bytes": 9709902,
+      "sha256": "48c7115e1bdb4eca98704592b8868811c061807d9f899ead1becc5e5a59424ec"
+    }
+  ]
+}

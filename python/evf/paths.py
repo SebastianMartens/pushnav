@@ -94,6 +94,16 @@ def tetra3rs_database_path() -> Path:
     return _REPO_ROOT / "data" / "tetra3rs_gaia.bin"
 
 
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+def solver_db_dir() -> Path:
+    """Directory holding solver_dbs.json and the tetra3rs database files.
+
+    Same directory as tetra3rs_database_path() in every layout (dev repo,
+    macOS bundle, Linux/Windows release, headless PUSHNAV_ROOT).
+    """
+    return tetra3rs_database_path().parent
+
+
 def version_json() -> Path:
     if _BUNDLE_MODE:
         return _RESOURCES / "VERSION.json"
