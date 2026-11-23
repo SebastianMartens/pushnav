@@ -54,8 +54,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import tetra3rs
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
 REGISTRY_NAME = "solver_dbs.json"
@@ -174,6 +172,11 @@ def update_version_json(out_dir: Path, entries: list[dict]) -> None:
 
 def build_one(spec: DbSpec, out_dir: Path, force: bool) -> dict:
     """Build (or reuse) one database file; return its registry entry."""
+    # Imported here, not at module level: scripts/bench_solvers.py imports the
+    # DB_SPECS table from this module and must still be able to print its
+    # friendly "tetra3rs not installed" message.
+    import tetra3rs
+
     out_path = out_dir / spec.filename
     if out_path.exists() and not force:
         print(f"{spec.name}: {out_path.name} already exists, skipping "

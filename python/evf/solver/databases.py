@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from typing import Any, Callable
 import tetra3rs
 
 from evf.paths import solver_db_dir, tetra3rs_database_path
+from evf.solver.fov import validate_fov
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +46,24 @@ _FALLBACK_NARROW_NAME = "narrow"
 _FALLBACK_NARROW_RANGE = (7.0, 10.0)
 
 
-class NarrowDatabaseMissing(FileNotFoundError):
-    """The registry lists the narrow database but its file is missing.
+class NarrowDatabaseError(Exception):
+    """The registry has no usable ``narrow`` database.
 
     The narrow database is the base every install has had since the first
-    release, so this fails loudly (like a missing tetra3rs_gaia.bin always
-    did: the engine logs "Failed to load tetra3rs database" and runs without
-    a solver) instead of quietly solving with the wide database.
+    release, so a registry that cannot provide it fails loudly (like a missing
+    tetra3rs_gaia.bin always did: the engine logs "Failed to load tetra3rs
+    database" and runs without a solver) instead of quietly solving the legacy
+    8.86 deg setup with the wide database, where every solve would fail.
     """
+
+
+class NarrowDatabaseMissing(NarrowDatabaseError, FileNotFoundError):
+    """The registry lists the narrow database but its file is missing."""
+
+
+class NarrowDatabaseInvalid(NarrowDatabaseError, ValueError):
+    """The registry's narrow entry is unusable (bad FOV range, bad file name),
+    or the registry lists other databases but no narrow one."""
 
 
 @dataclass(frozen=True)
@@ -94,7 +106,8 @@ def load_registry(db_dir: Path | None = None) -> list[DbInfo]:
     Result is sorted narrowest range first.
 
     Raises :class:`NarrowDatabaseMissing` if the entry named ``narrow`` is
-    listed but its file is missing.
+    listed but its file is missing, and :class:`NarrowDatabaseInvalid` if that
+    entry is unusable or the registry lists databases but no ``narrow`` one.
     """
     directory = Path(db_dir) if db_dir is not None else solver_db_dir()
     reg_path = directory / REGISTRY_FILENAME
@@ -106,7 +119,7 @@ def load_registry(db_dir: Path | None = None) -> list[DbInfo]:
             info = _parse_entry(directory, entry)
             if info is not None:
                 infos.append(info)
-    except NarrowDatabaseMissing as exc:
+    except NarrowDatabaseError as exc:
         logger.error("%s", exc)
         raise
     except FileNotFoundError:
@@ -117,6 +130,13 @@ def load_registry(db_dir: Path | None = None) -> list[DbInfo]:
         infos = []
     if not infos:
         return [_fallback_narrow()]
+    if not any(i.name == _FALLBACK_NARROW_NAME for i in infos):
+        exc = NarrowDatabaseInvalid(
+            f"Solver registry {reg_path} lists {', '.join(repr(i.name) for i in infos)} "
+            f"but no usable {_FALLBACK_NARROW_NAME!r} database"
+        )
+        logger.error("%s", exc)
+        raise exc
     return sorted(infos, key=lambda i: (i.width_deg, i.name))
 
 
@@ -124,8 +144,7 @@ def _parse_entry(directory: Path, entry: dict[str, Any]) -> DbInfo | None:
     name = str(entry["name"])
     filename = str(entry["file"])
     if Path(filename).name != filename:
-        logger.warning("Solver registry entry %r: file %r must be a plain file name", name, filename)
-        return None
+        return _skip_entry(name, f"file {filename!r} must be a plain file name")
     path = directory / filename
     if not path.is_file():
         if name == _FALLBACK_NARROW_NAME:
@@ -133,11 +152,18 @@ def _parse_entry(directory: Path, entry: dict[str, Any]) -> DbInfo | None:
         logger.warning("Solver database %r is listed but %s is missing; skipping", name, path)
         return None
     lo, hi = float(entry["min_fov_deg"]), float(entry["max_fov_deg"])
-    if not 0.0 < lo < hi:
-        logger.warning("Solver registry entry %r: bad FOV range %s..%s; skipping", name, lo, hi)
-        return None
+    if not (math.isfinite(lo) and math.isfinite(hi) and 0.0 < lo < hi):
+        return _skip_entry(name, f"bad FOV range {lo}..{hi}")
     mag = entry.get("star_max_magnitude")
     return DbInfo(name, path, lo, hi, float(mag) if mag is not None else None)
+
+
+def _skip_entry(name: str, reason: str) -> None:
+    """An unusable entry is skipped (WARNING); for ``narrow`` that is an error."""
+    if name == _FALLBACK_NARROW_NAME:
+        raise NarrowDatabaseInvalid(f"Solver database {name!r} is unusable: {reason}")
+    logger.warning("Solver registry entry %r: %s; skipping", name, reason)
+    return None
 
 
 def _fallback_narrow() -> DbInfo:
@@ -153,6 +179,7 @@ def select_database(infos: list[DbInfo], fov_deg: float) -> DbSelection:
     """
     if not infos:
         raise ValueError("no solver databases registered")
+    fov_deg = validate_fov(fov_deg)  # NaN would count as "in range" (distance_to(nan) == 0)
     containing = [i for i in infos if i.distance_to(fov_deg) == 0.0]
     if containing:
         return DbSelection(min(containing, key=lambda i: (i.width_deg, i.name)), True)
