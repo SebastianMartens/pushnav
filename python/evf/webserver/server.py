@@ -60,9 +60,12 @@ _IMG_W = 1280
 _IMG_H = 720
 
 
-_REFERENCE_IMG_W = 1280  # the width the overlay markers and the edge-arrow margin are sized for
-_EDGE_ARROW_MARGIN_PX = 68
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md section 5.5)
+# The overlay markers and the edge-arrow margin are sized for a 1280 px wide frame and scale with image_w.
+_REFERENCE_IMG_W = 1280  # fork: camera-controls
+_EDGE_ARROW_MARGIN_PX = 68  # fork: camera-controls
 
+# fork: camera-controls: the camera block of /ws while no camera is connected
 _NO_CAMERA_INFO = {
     "camera_model": None, "backend": None, "camera_key": None,
     "sensor_width_mm": None, "focal_length_mm": None,
@@ -77,7 +80,7 @@ def _default_geometry() -> dict:
         "fov_source": "default",
         "solver_db": None,
         "fov_out_of_range": False,
-        "camera_info": None,
+        "camera_info": None,  # fork: camera-controls
     }
 
 
@@ -794,7 +797,7 @@ class WebServer:
             if offset_pixel_x is not None:
                 edge_x, edge_y, edge_angle = edge_arrow_position(
                     offset_pixel_x, offset_pixel_y,
-                    img_w, img_h, margin=margin,
+                    img_w, img_h, margin=margin,  # fork: camera-controls
                     origin_x=origin_x, origin_y=origin_y,
                 )
             else:
@@ -804,7 +807,7 @@ class WebServer:
                 far_x = origin_x + far * math.sin(rad)
                 far_y = origin_y - far * math.cos(rad)
                 edge_x, edge_y, edge_angle = edge_arrow_position(
-                    far_x, far_y, img_w, img_h, margin=margin,
+                    far_x, far_y, img_w, img_h, margin=margin,  # fork: camera-controls
                     origin_x=origin_x, origin_y=origin_y,
                 )
 

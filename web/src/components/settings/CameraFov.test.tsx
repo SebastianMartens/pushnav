@@ -93,6 +93,28 @@ describe("CameraFov", () => {
     expect(setCameraFov).not.toHaveBeenCalled();
   });
 
+  it("lets the user turn a learned value into a user value by entering the pre-filled focal length", () => {
+    render(<CameraFov state={makeState({ fov_source: "learned" })} />);
+    const input = screen.getByLabelText(/focal length/i);
+    expect(input).toHaveValue(25);
+    fireEvent.blur(input); // unchanged, but the source is "learned"
+    expect(setCameraFov).toHaveBeenCalledWith({ focal_length_mm: 25 });
+  });
+
+  it("keeps an edit in progress when the search ends and the focal length fills in", () => {
+    const { rerender } = render(
+      <CameraFov state={makeState({ fov_source: "searching" }, { focal_length_mm: null })} />,
+    );
+    const input = screen.getByLabelText(/focal length/i);
+    fireEvent.change(input, { target: { value: "35" } });
+    rerender(<CameraFov state={makeState({ fov_source: "learned", fov_h_deg: 8.82 }, { focal_length_mm: 73.5 })} />);
+    expect(screen.getByLabelText(/focal length/i)).toHaveValue(35);
+    fireEvent.blur(screen.getByLabelText(/focal length/i));
+    expect(setCameraFov).toHaveBeenCalledWith({ focal_length_mm: 35 });
+    // after the commit the engine's value is shown again
+    expect(screen.getByLabelText(/focal length/i)).toHaveValue(73.5);
+  });
+
   it("is disabled with a hint when the camera does not report its sensor size", () => {
     render(<CameraFov state={makeState({ fov_source: "default", fov_h_deg: 8.86, solver_db: "narrow" },
       { sensor_width_mm: null, focal_length_mm: null, camera_model: "OV9281", backend: "linux-v4l2",

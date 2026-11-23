@@ -29,7 +29,7 @@ from evf.camera.stream import GeometryTracker, jpeg_size
 from evf.config import profiles
 from evf.config.manager import ConfigManager
 from evf.engine.frame_buffer import LatestFrame
-from evf.solver.databases import DbInfo
+from evf.solver.databases import DatabaseNotLoaded, DbInfo
 from evf.solver.fov import (
     DEFAULT_RESOLVED_FOV,
     FOV_SOURCE_DEFAULT,
@@ -222,21 +222,30 @@ class CameraProfile:
         if databases is not None:
             databases.release_extras()
 
-    def _ensure_search_databases(self, databases) -> None:
-        """The search alternates between the databases, so it holds them all (spec 5.4.3)."""
-        if not self._search_loaded:
-            self._search_loaded = True
-            databases.hold_all()
+    def _ensure_search_databases(self, databases, search: FovSearch) -> None:
+        """The search alternates between the databases, so it holds them all (spec 5.4.3).
+
+        Called without ``self._lock``: a load takes up to 0.15 s and ``/ws`` reads
+        ``camera_info()`` under that lock. A failed load is retried on the next call.
+        """
+        if self._search_loaded:
+            return
+        complete = databases.hold_all()
+        with self._lock:
+            if self._search is not search:  # the search ended while we loaded
+                databases.release_extras()
+            elif complete:
+                self._search_loaded = True
 
     def plan(self) -> SolvePlan:
         """What the solver thread solves next. Called once per frame on that thread."""
         with self._lock:
             search = self._search
-            databases = self._databases()
-            if search is not None and databases is not None:
-                self._ensure_search_databases(databases)
-                step = search.next_step(databases.loaded())
-                return SolvePlan(step.params, step.database)
+        databases = self._databases()
+        if search is not None and databases is not None:
+            self._ensure_search_databases(databases, search)
+            step = search.next_step(databases.loaded())
+            return SolvePlan(step.params, step.database)
         return SolvePlan(self._params.get())
 
     def solve_succeeded(self, result: dict, plan: SolvePlan | None = None) -> None:
@@ -276,8 +285,8 @@ class CameraProfile:
             return  # a solve without a usable fov_deg decides nothing
         database = plan.database.name if plan is not None and plan.database is not None else "active"
         logger.info("FOV search done: solved with the %s database, FOV %.2f deg", database, fov)
-        self._stop_search()
-        self._store(key, fov, FOV_SOURCE_LEARNED)
+        self._store(key, fov, FOV_SOURCE_LEARNED)  # requests the fitting database first, so ...
+        self._stop_search()  # ... the release keeps it for the swap instead of loading it again
 
     def _store(self, key: str, fov_h_deg: float, source: str) -> None:
         """Persist the profile FOV, hand it to the solver and ask for the fitting database."""
@@ -292,18 +301,20 @@ class CameraProfile:
         """
         with self._lock:
             search = self._search
-            databases = self._databases()
-            if search is None or databases is None:
-                params = self._params.get()
-                return solver.solve_frame(frame, params.fov_estimate_deg, params.fov_max_error_deg)
-            self._ensure_search_databases(databases)
-            steps = search.steps(databases.loaded())
+        databases = self._databases()
+        if search is None or databases is None:
+            params = self._params.get()
+            return solver.solve_frame(frame, params.fov_estimate_deg, params.fov_max_error_deg)
+        self._ensure_search_databases(databases, search)
         result: dict = {}
-        for step in steps:
-            result = solver.solve_frame(
-                frame, step.params.fov_estimate_deg, step.params.fov_max_error_deg,
-                database=step.database,
-            )
+        for step in search.steps(databases.loaded()):
+            try:
+                result = solver.solve_frame(
+                    frame, step.params.fov_estimate_deg, step.params.fov_max_error_deg,
+                    database=step.database,
+                )
+            except DatabaseNotLoaded:
+                continue  # the search ended (user FOV, camera gone) while we solved: skip it quietly
             if PlateSolver.is_valid(result, self._config.min_matches, self._config.max_prob):
                 self.solve_succeeded(result, SolvePlan(step.params, step.database))
                 break

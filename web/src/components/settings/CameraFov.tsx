@@ -25,6 +25,9 @@ function fovText(state: Pick<EnginePayload, "fov_h_deg" | "fov_source">): string
 
 export function CameraFov({ state }: Props) {
   const [error, setError] = useState<string | null>(null);
+  // What the user is typing; null = show the engine's value. Kept while the engine's value changes
+  // under the user's hands (searching -> learned fills in the focal length).
+  const [draft, setDraft] = useState<string | null>(null);
   const cam = state.camera;
   const connected = cam.camera_key != null || cam.camera_model != null;
   const sensorKnown = cam.sensor_width_mm != null;
@@ -38,7 +41,8 @@ export function CameraFov({ state }: Props) {
   function commitFocalLength(raw: string) {
     const value = Number(raw);
     if (raw.trim() === "" || !Number.isFinite(value)) return; // empty: nothing to send
-    if (value === cam.focal_length_mm) return; // unchanged
+    // The pre-filled value of a learned FOV is the user's to confirm: entering it makes it a user value.
+    if (value === cam.focal_length_mm && state.fov_source === "user") return; // unchanged
     run({ focal_length_mm: value });
   }
 
@@ -65,11 +69,14 @@ export function CameraFov({ state }: Props) {
           step={0.5}
           placeholder="e.g. 25"
           disabled={!canEnterLens}
-          defaultValue={cam.focal_length_mm ?? ""}
-          key={`focal-${cam.camera_key}-${cam.focal_length_mm ?? ""}-${state.fov_source}`}
+          value={draft ?? cam.focal_length_mm ?? ""}
           className="w-24 h-8"
           aria-label="Focal length in millimetres"
-          onBlur={(e) => commitFocalLength(e.currentTarget.value)}
+          onChange={(e) => setDraft(e.currentTarget.value)}
+          onBlur={(e) => {
+            commitFocalLength(e.currentTarget.value);
+            setDraft(null);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") e.currentTarget.blur();
           }}

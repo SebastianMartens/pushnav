@@ -36,7 +36,7 @@ import tetra3rs
 from PIL import Image
 
 # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
-from evf.solver.databases import DbInfo, SolverDatabases, load_registry
+from evf.solver.databases import DatabaseNotLoaded, DbInfo, SolverDatabases, load_registry
 from evf.solver.fov import LEGACY_FOV_DEG
 
 logger = logging.getLogger(__name__)
@@ -132,7 +132,7 @@ class PlateSolver:
         if database is not None:  # fork: camera-controls
             db = self._databases.db_for(database)
             if db is None:
-                raise RuntimeError(f"solver database {database.name!r} is not loaded")
+                raise DatabaseNotLoaded(f"solver database {database.name!r} is not loaded")
         t0 = time.monotonic()
         result = db.solve_from_centroids(
             extraction.centroids,

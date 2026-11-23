@@ -495,16 +495,24 @@ Decisions where the text above is silent (S2; `solver/fov_search.py`, `engine/ca
 - **When it runs.** For a profile with no FOV, when HELLO carries a sensor size (`capabilities.sensor` with
   `pixel_size_um`: the C# server) and the registry has more than one database. Every other camera (no sensor size,
   which is every upstream server) keeps step 4 of §5.2: 8.86°, narrow database, no search, and it learns nothing.
+  **Confirmed by Sebastian (2026-11-23):** the search runs only with the Windows C# camera server.
 - **"Sensor-based guess"** = the FOV a 25 mm lens (§5.2.1 reference) gives on that sensor: 25.6° on the IMX174, so
   the wide database goes first; 8.8° on the 3.8 mm wide OV9281, so the narrow one would. Only the order is affected.
-- **Both databases are held** while the search runs (`SolverDatabases.hold_all()`, loaded on the first search frame,
-  `release_extras()` when it ends or the camera goes away), so alternating frames never reloads a 50 MB file. Each
+- **Both databases are held** while the search runs (`SolverDatabases.hold_all()`, loaded on the first search frame
+  outside the profile lock and retried on the next frame after a failed load, `release_extras()` when it ends or the
+  camera goes away), so alternating frames never reloads a 50 MB file. While held, a swap takes the new database from
+  the held ones and keeps the old active one instead of dropping it, so each file is loaded once; at the end of the
+  search the database the pending swap wants is kept for that swap (no second load). Each
   step is `(database, centre FOV, half the range)`; `PlateSolver.solve_frame(..., database=info)` solves against
   that entry.
 - **The wizard works during the search.** The sync solve (state SYNC, no solver thread) tries each database in
   turn on the one frame (`CameraProfile.solve_for_sync()`); a valid solve ends the search the same way. The solver
   thread handles CALIBRATE, WARMING_UP and TRACKING.
 - **UI state.** `/ws` `fov_source` is `"searching"` while it runs; `fov_h_deg` stays at 8.86° until it ends.
+- **Known limitation.** A lens whose FOV falls between the two databases (14°, e.g. 40 to 50 mm on the IMX174 gives
+  about 13 to 16°), or a sky that never solves (clouds, lens cap), keeps the search running ("Finding field of
+  view…") with both databases held (+17 MB over the narrow one, §4.11) until the user enters a focal length. No
+  database covers such a lens anyway (§7 out of scope).
 - **After it.** The learned FOV is stored and requested from the database registry; the solver thread swaps to the
   fitting database; learning (§5.2.2) takes over. A focal length or FOV entered in Settings ends the search.
   "Reset to learned" clears a user value and starts the search again.
@@ -607,6 +615,12 @@ Under Camera, add:
 - a "Reset to learned" action that clears a user value;
 - a hint when `fov_out_of_range` is set ("No star database covers this
   field of view").
+
+The focal-length field needs the sensor size, so it is disabled for a camera that does not report one (every
+upstream server). **Decided by Sebastian (2026-11-23):** no field for the FOV in degrees in Settings for those
+cameras; `POST /api/camera/fov` keeps accepting `fov_h_deg` (and `config.json` can be edited by hand,
+`docs/hardware.md`). A learned FOV's focal length is pre-filled; entering it (also unchanged) turns it into a user
+value. A value being typed is kept while the engine's state changes.
 
 ---
 
@@ -787,7 +801,7 @@ the 25 mm lens from solving, and it works over today's v1 session.
 - Files: `python/evf/{solver/fov.py, solver/fov_learning.py, solver/fov_search.py, solver/databases.py, solver/solver.py, solver/thread.py, engine/camera_profile.py, engine/engine.py, webserver/server.py, config/profiles.py}`, `web/src/lib/types.ts`, `web/src/components/settings/Settings.tsx`, `web/src/components/live-view/{NavOverlay,SyncCandidatesOverlay,StarOverlay}.tsx`, `web/src/components/wizard/Wizard.test.tsx`.
 - Test: pytest for learning (outliers, range guard, 10 % step), search (fake solver that solves on one database only), the FOV API, `has_calibration` across camera keys; the wide-field fixture from S1 solves with the wide database (the comparison with the narrow database is a Q7 measurement on real frames, not a test assertion); vitest for the Settings fields, marker scaling and the 1936x1216 / 25.6° Wizard fixture.
 - **[HW]** Task 6.4 (fresh profile finds ~25.6° by search; with 25 mm entered no search). Task 4.11 on the laptop (no Pi, Q11).
-- **S2 status (branch `feat/s2-fov-ui`).** Done: 3.3, 4.3, 4.6, 4.10, 4.11, 5.3, 5.5 (notes at the tasks). Open: the **[HW]** task 6.4 (fresh IDS profile finds ~25.6° by search; with 25 mm entered no search) and the wide-field fixture from real frames (the synthetic 25.6° fixture of S1a still exists). Decisions where the spec was silent: the FOV search runs only when HELLO has a sensor size (§5.4.4 "Decisions"), so the upstream camera is unchanged; the range guard is 5 % of the range width; learning only refines a `"learned"` value; a calibration from before profiles is claimed by the first camera that connects. Open question for Sebastian: should a camera without a sensor size (OV9281 on the Windows C server, Linux, macOS) also be offered a FOV entry in degrees in Settings? The API takes `fov_h_deg`; the panel shows only the focal-length field (§6.3), which needs the sensor size.
+- **S2 status (branch `feat/s2-fov-ui`).** Done: 3.3, 4.3, 4.6, 4.10, 4.11, 5.3, 5.5 (notes at the tasks). Open: the **[HW]** task 6.4 (fresh IDS profile finds ~25.6° by search; with 25 mm entered no search) and the wide-field fixture from real frames (the synthetic 25.6° fixture of S1a still exists). Decisions where the spec was silent: the FOV search runs only when HELLO has a sensor size (§5.4.4 "Decisions"), so the upstream camera is unchanged; the range guard is 5 % of the range width; learning only refines a `"learned"` value; a calibration from before profiles is claimed by the first camera that connects. Answered by Sebastian (2026-11-23): the search runs only with the C# server (HELLO with `pixel_size_um`), and there is no degrees field in Settings for cameras without a sensor size (§6.3). Known limitation of the search: §5.4.4. Review fixes: one load per database across a swap during the search, the search's database load outside the profile lock and retried after a failure, a quiet skip when the search ends during the wizard's sync solve.
 
 **S3 Protocol v2 in the engine, against the mock.**
 - Negotiation, STREAM_INFO / FRAME_RAW parsing, float `set_control`, liveness, one restore path, per-profile control values with units, dropping results of the wrong size, mock v2 mode, conformance v2 vectors, `VERSION.json` `protocol_version: 2`.

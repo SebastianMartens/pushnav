@@ -51,6 +51,10 @@ _FALLBACK_NARROW_NAME = "narrow"
 _FALLBACK_NARROW_RANGE = (7.0, 10.0)
 
 
+class DatabaseNotLoaded(RuntimeError):
+    """A solve asked for a database that is not in memory (a FOV search ended meanwhile)."""
+
+
 class NarrowDatabaseError(Exception):
     """The registry has no usable ``narrow`` database.
 
@@ -228,6 +232,7 @@ class SolverDatabases:
         self._fov_deg = initial_fov_deg
         self._failed: DbInfo | None = None  # target whose load failed (no retry loop)
         self._extras: dict[str, Any] = {}  # fork: FOV search: loaded besides the active one
+        self._holding = False  # fork: a FOV search holds every database (hold_all .. release_extras)
 
     # -- read side ------------------------------------------------------------
 
@@ -315,8 +320,10 @@ class SolverDatabases:
             pending = self._wanted
             if pending == self._active or pending == self._failed:
                 return False
+            new_db = self._extras.get(pending.name)  # held for a FOV search: no second load
         try:
-            new_db = self._load(pending)
+            if new_db is None:
+                new_db = self._load(pending)
         except Exception as exc:  # noqa: BLE001 - keep solving with the old db
             logger.error("Failed to load solver database %r from %s: %s",
                          pending.name, pending.path, exc)
@@ -326,6 +333,10 @@ class SolverDatabases:
             return False
         with self._lock:
             old = self._active
+            old_db = self._db
+            self._extras.pop(pending.name, None)
+            if self._holding:  # a FOV search still needs the old one
+                self._extras[old.name] = old_db
             self._db = new_db  # old handle is freed when the last solve drops it
             self._active = pending
         logger.info("Solver database swapped: %s -> %s", old.name, pending.name)
@@ -333,13 +344,21 @@ class SolverDatabases:
 
     # -- FOV search (spec 5.4.3 / 5.4.4) ----------------------------------------
 
-    def hold_all(self) -> None:
+    def hold_all(self) -> bool:
         """Load every registered database that is not loaded yet and keep it.
 
         Only for the duration of a FOV search, which alternates solves between
         the databases. Callers queue on the load lock like a swap does; a
-        database that fails to load is skipped (ERROR logged).
+        database that fails to load is skipped (ERROR logged). While held, a
+        swap moves the old active database into the extras instead of dropping
+        it, and takes the new one from them instead of loading it again.
+
+        Returns True if every database is loaded afterwards, so the caller can
+        retry after a failure.
         """
+        with self._lock:
+            self._holding = True
+        complete = True
         for info in self._registry:
             with self._load_lock:
                 with self._lock:
@@ -349,15 +368,24 @@ class SolverDatabases:
                     db = self._load(info)
                 except Exception as exc:  # noqa: BLE001 - search with what is loaded
                     logger.error("Failed to load solver database %r from %s: %s", info.name, info.path, exc)
+                    complete = False
                     continue
                 with self._lock:
                     self._extras[info.name] = db
+        return complete
 
     def release_extras(self) -> None:
-        """Drop the databases ``hold_all`` loaded; the active one stays."""
+        """Drop the databases ``hold_all`` loaded; the active one stays.
+
+        A database that a pending swap wants stays until that swap adopts it, so
+        the end of a FOV search does not load it a second time.
+        """
         with self._lock:
-            dropped = list(self._extras)
-            self._extras.clear()
+            self._holding = False
+            keep = self._wanted.name if self._wanted != self._active else None
+            dropped = [name for name in self._extras if name != keep]
+            for name in dropped:
+                del self._extras[name]
         if dropped:
             logger.info("Released solver databases held for the FOV search: %s", ", ".join(dropped))
 

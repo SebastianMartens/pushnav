@@ -2,6 +2,10 @@ import { useEffect, useState } from "react";
 import type { EnginePayload, NavData } from "@/lib/types";
 import { overlayScale, scaleAbout } from "@/lib/overlayScale"; // fork: camera-controls
 
+// fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md section 5.5, task 4.10):
+// marker radii, strokes, font sizes and offsets below are multiplied by k = overlayScale(image_w)
+// (image_w / 1280); at 1280 px k is 1 and nothing changes. Each use is marked with "k".
+
 interface Props {
   state: EnginePayload;
 }
@@ -101,7 +105,7 @@ export function NavOverlay({ state }: Props) {
   if (!nav || !nav.active) return null;
 
   const zone = pickZone(nav);
-  const k = overlayScale(state.image_w); // markers are sized for a 1280 px wide frame
+  const k = overlayScale(state.image_w); // fork: camera-controls: markers are sized for a 1280 px wide frame
   const ox = state.origin_x;
   const oy = state.origin_y;
 
@@ -110,7 +114,7 @@ export function NavOverlay({ state }: Props) {
       return null;
     }
     const angleRad = (nav.edge_angle_deg * Math.PI) / 180;
-    // Arrow tip 68px inward from edge — same as DPG behavior
+    // Arrow tip 68px inward from edge — same as DPG behavior (fork: camera-controls: times k)
     const tipX = nav.edge_x - Math.sin(angleRad) * 68 * k;
     const tipY = nav.edge_y + Math.cos(angleRad) * 68 * k;
     // Perpendicular to the push direction (eyepiece → comet tip), used to

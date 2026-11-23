@@ -2,6 +2,10 @@ import type { EnginePayload } from "@/lib/types";
 import { api } from "@/lib/api";
 import { overlayScale } from "@/lib/overlayScale"; // fork: camera-controls
 
+// fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md section 5.5, task 4.10):
+// marker radii, strokes, font sizes and offsets below are multiplied by k = overlayScale(image_w)
+// (image_w / 1280); at 1280 px k is 1 and nothing changes. Each use is marked with "k".
+
 interface Props {
   state: EnginePayload;
 }
@@ -15,7 +19,7 @@ export function SyncCandidatesOverlay({ state }: Props) {
   const candidates = state.sync.candidates;
   const selectedIdx = state.sync.selected_idx;
   if (!candidates.length) return null;
-  const k = overlayScale(state.image_w); // markers are sized for a 1280 px wide frame
+  const k = overlayScale(state.image_w); // fork: camera-controls: markers are sized for a 1280 px wide frame
 
   return (
     <g>
