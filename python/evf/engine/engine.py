@@ -603,7 +603,8 @@ class Engine:
             hello = self._subprocess_mgr.start()
             logger.info("Camera connected: %s", hello)
             self._camera_wait_logged = False
-            self._fork_camera_connected(hello)
+            self._fork_camera_connected(hello)  # fork: camera-controls
+            self._subprocess_mgr.on_recovered = self._fork_camera_connected  # fork: camera-controls
 
             client = self._subprocess_mgr.client
             if client:

@@ -82,6 +82,10 @@ class SubprocessManager:
         self._recovery_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._recovering = False
+        # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+        # Called with the new HELLO after a successful recovery reconnect: the C server
+        # fallback (exit code 3) can bring up a different camera than before.
+        self.on_recovered = None
 
     # -- public API -----------------------------------------------------------
 
@@ -346,8 +350,9 @@ class SubprocessManager:
                         return
                     self._fork_begin_attempt()
                     self._spawn_process()
-                    self._connect_with_retry()
+                    hello = self._connect_with_retry()
                     self._fork_remember_connected()
+                    self._fork_recovered(hello)  # fork: camera-controls
                     self._client.start_receiving()
                     # Restore camera settings from config
                     if self._config.exposure is not None:
@@ -422,6 +427,16 @@ class SubprocessManager:
         """The server that connected is the one recovery attempts start with (spec 8.2)."""
         if self._server_plan is not None and self._fork_running is not None:
             self._server_plan.switch_to(self._fork_running)
+
+    def _fork_recovered(self, hello: dict) -> None:
+        """fork: camera-controls. Tell the engine which camera answered after a recovery."""
+        callback = self.on_recovered
+        if callback is None:
+            return
+        try:
+            callback(hello)
+        except Exception as exc:  # recovery must not fail because of a profile problem
+            logger.error("on_recovered callback failed: %s", exc)
 
     def _fork_log_server(self, hello: dict) -> None:
         """After HELLO: which server answered, and what it drives."""
