@@ -33,6 +33,8 @@ from typing import Callable, Protocol
 from aiohttp import WSCloseCode, web
 
 from evf.config.manager import ConfigManager
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+from evf.engine.camera_profile import FovRequestError, NoCameraConnected
 from evf.engine.frame_buffer import LatestFrame
 from evf.engine.goto_target import GotoTarget
 from evf.engine.navigation import compute_navigation, edge_arrow_position
@@ -58,6 +60,15 @@ _IMG_W = 1280
 _IMG_H = 720
 
 
+_REFERENCE_IMG_W = 1280  # the width the overlay markers and the edge-arrow margin are sized for
+_EDGE_ARROW_MARGIN_PX = 68
+
+_NO_CAMERA_INFO = {
+    "camera_model": None, "backend": None, "camera_key": None,
+    "sensor_width_mm": None, "focal_length_mm": None,
+}
+
+
 def _default_geometry() -> dict:
     return {
         "image_w": _IMG_W,
@@ -66,6 +77,7 @@ def _default_geometry() -> dict:
         "fov_source": "default",
         "solver_db": None,
         "fov_out_of_range": False,
+        "camera_info": None,
     }
 
 
@@ -78,6 +90,9 @@ class EngineActions(Protocol):
     def use_previous_calibration(self) -> None: ...
     def retry_camera(self) -> bool: ...
     def set_control(self, name: str, value: int) -> None: ...
+    def set_camera_fov(  # fork: camera-controls
+        self, focal_length_mm: object = None, fov_h_deg: object = None, reset: bool = False,
+    ) -> dict: ...
     def clear_goto_target(self) -> None: ...
     def set_goto_target(self, ra_deg: float, dec_deg: float) -> None: ...
     def set_audio_enabled(self, enabled: bool) -> None: ...
@@ -285,6 +300,7 @@ class WebServer:
         app.router.add_post("/api/sync/select", self._api_sync_select)
         app.router.add_post("/api/calibration/use-previous", self._api_use_previous_calibration)
         app.router.add_post("/api/camera/retry", self._api_camera_retry)
+        app.router.add_post("/api/camera/fov", self._api_camera_fov)  # fork: camera-controls
         app.router.add_post("/api/control", self._api_set_control)
         app.router.add_post("/api/goto/clear", self._api_goto_clear)
         app.router.add_post("/api/goto/set", self._api_goto_set)
@@ -497,6 +513,44 @@ class WebServer:
             return web.Response(status=500, text=str(exc))
         return web.json_response({"connected": bool(connected)})
 
+    async def _api_camera_fov(self, request: web.Request) -> web.Response:
+        """fork: camera-controls (spec 6.1). Set or reset the connected camera's FOV.
+
+        Body: ``{"focal_length_mm": 25}``, ``{"fov_h_deg": 25.6}`` or ``{"reset": true}``.
+        200 + the new FOV state; 400 for a bad request or an unknown sensor size;
+        409 when no camera is connected.
+        """
+        if self._actions is None:
+            return web.Response(status=503, text="No actions wired")
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return web.Response(status=400, text="Expected a JSON object")
+        unknown = set(body) - {"focal_length_mm", "fov_h_deg", "reset"}
+        if unknown:
+            return web.Response(status=400, text=f"Unknown field(s): {', '.join(sorted(unknown))}")
+        reset = body.get("reset", False)
+        if not isinstance(reset, bool):
+            return web.Response(status=400, text='"reset" must be true or false')
+        try:
+            result = await asyncio.to_thread(
+                lambda: self._actions.set_camera_fov(
+                    focal_length_mm=body.get("focal_length_mm"),
+                    fov_h_deg=body.get("fov_h_deg"),
+                    reset=reset,
+                )
+            )
+        except FovRequestError as exc:
+            return web.Response(status=400, text=str(exc))
+        except NoCameraConnected as exc:
+            return web.Response(status=409, text=str(exc))
+        except Exception as exc:
+            logger.exception("set_camera_fov failed: %s", exc)
+            return web.Response(status=500, text=str(exc))
+        return web.json_response(result)
+
     async def _api_set_control(self, request):
         body = await request.json()
         name = str(body["name"])
@@ -626,6 +680,8 @@ class WebServer:
             "connected": True if (self._frame_buffer and self._frame_buffer.get()[0]) else False,
             "all_centroids": snap.all_centroids if snap.valid else None,
             "matched_centroids": snap.matched_centroids if snap.valid else None,
+            # fork: camera-controls: camera_model, backend, camera_key, sensor_width_mm, focal_length_mm
+            **(geo.get("camera_info") or _NO_CAMERA_INFO),
         }
 
         stellarium_blk = dict(
@@ -731,11 +787,14 @@ class WebServer:
         )
 
         edge_x = edge_y = edge_angle = None
+        # fork: camera-controls: the arrow sits 68 px inside the edge of a 1280 px wide frame
+        # (like the overlay markers it scales with the image width, spec 5.5)
+        margin = _EDGE_ARROW_MARGIN_PX * img_w / _REFERENCE_IMG_W
         if not in_fov:
             if offset_pixel_x is not None:
                 edge_x, edge_y, edge_angle = edge_arrow_position(
                     offset_pixel_x, offset_pixel_y,
-                    img_w, img_h, margin=68,
+                    img_w, img_h, margin=margin,
                     origin_x=origin_x, origin_y=origin_y,
                 )
             else:
@@ -745,7 +804,7 @@ class WebServer:
                 far_x = origin_x + far * math.sin(rad)
                 far_y = origin_y - far * math.cos(rad)
                 edge_x, edge_y, edge_angle = edge_arrow_position(
-                    far_x, far_y, img_w, img_h, margin=68,
+                    far_x, far_y, img_w, img_h, margin=margin,
                     origin_x=origin_x, origin_y=origin_y,
                 )
 
