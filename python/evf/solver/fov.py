@@ -28,20 +28,22 @@ logger = logging.getLogger(__name__)
 LEGACY_FOV_DEG = 8.86
 _MIN_FOV_MAX_ERROR_DEG = 1.5
 _FOV_MAX_ERROR_FRACTION = 0.10
+_MAX_FOV_DEG = 180.0  # exclusive upper bound of a horizontal FOV
 
 
 def validate_fov(fov_deg: float) -> float:
     """Return ``fov_deg`` as a float, or raise ``ValueError`` if it cannot be a FOV.
 
-    Rejects NaN, infinity, zero and negative values (and non-numbers). NaN in
+    Rejects NaN, infinity, zero, negative values and 180 deg or more (and
+    non-numbers): a horizontal field of view is below a half sphere. NaN in
     particular must never reach database selection: every comparison with NaN
     is false, so ``DbInfo.distance_to(nan)`` would report 0.0 ("in range").
     """
     if isinstance(fov_deg, bool) or not isinstance(fov_deg, numbers.Real):
         raise ValueError(f"FOV must be a number, got {fov_deg!r}")
     value = float(fov_deg)
-    if not math.isfinite(value) or value <= 0.0:
-        raise ValueError(f"FOV must be a finite number > 0 degrees, got {fov_deg!r}")
+    if not math.isfinite(value) or not 0.0 < value < _MAX_FOV_DEG:
+        raise ValueError(f"FOV must be a finite number > 0 and < {_MAX_FOV_DEG:g} degrees, got {fov_deg!r}")
     return value
 
 
@@ -101,7 +103,7 @@ def resolve_fov(profile_fov_deg: object, profile_source: object = None) -> Resol
        ``fov_source``, e.g. one typed into config.json by hand, counts as
        ``"user"``.
     4. Otherwise (nothing stored, or a value that is not a finite number
-       > 0, logged as a WARNING): 8.86 deg, today's behaviour.
+       in (0, 180) deg, logged as a WARNING): 8.86 deg, today's behaviour.
     """
     if profile_fov_deg is None:
         return DEFAULT_RESOLVED_FOV

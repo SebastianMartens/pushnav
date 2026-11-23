@@ -60,14 +60,14 @@ class PlateSolver:
     (``evf.solver.databases``). Only one is loaded at a time: the one for
     ``initial_fov_deg`` (default the legacy 8.86 deg, narrow). A swap is
     requested through ``databases`` and done by ``apply_pending_database()``
-    on the solver thread.
+    (the solver thread between solves; the engine when none runs).
     """
 
     def __init__(
         self,
         database_path: Path | None = None,
         databases: SolverDatabases | None = None,
-        initial_fov_deg: float = LEGACY_FOV_DEG,
+        initial_fov_deg: float = LEGACY_FOV_DEG,  # fork: camera-controls
     ) -> None:
         if databases is not None:
             self._databases = databases

@@ -465,7 +465,7 @@ Resolution (`evf/solver/fov.py`, `SPEC_CAMERA_CONTROLS.md` §5.2; only steps 1 a
 3. *(not yet)* FOV search.
 4. Otherwise 8.86° with the narrow database, exactly as before profiles existed.
 
-A stored value that is not a finite number > 0 is ignored with a warning (step 4). The solver gets
+A stored value that is not a finite number in (0, 180) degrees is ignored with a warning (step 4). The solver gets
 `fov_estimate_deg = fov` and `fov_max_error_deg = max(1.5, 0.10 * fov)` (1.5° at 8.86°, 2.56° at 25.6°),
 read from an engine-owned, lock-protected `SolverParams` holder at the start of every solve, so a
 profile change applies to the next frame.

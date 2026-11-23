@@ -116,7 +116,7 @@ class TestResolveFov:
     def test_a_hand_entered_value_counts_as_user(self, source):
         assert resolve_fov(25.6, source).source == "user"
 
-    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), 0, 0.0, -8.86, "25.6", True, [25.6]])
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), 0, 0.0, -8.86, 180.0, 400, "25.6", True, [25.6]])
     def test_invalid_profile_value_falls_back_to_the_default(self, bad, caplog):
         with caplog.at_level(logging.WARNING, logger="evf.solver.fov"):
             r = resolve_fov(bad, "user")

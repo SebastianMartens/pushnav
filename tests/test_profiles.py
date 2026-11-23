@@ -189,3 +189,38 @@ class TestProfileHelpers:
         assert profiles.last_camera_key(cfg) is None
         profiles.set_fov(cfg, self.KEY, 25.6, "user")
         assert profiles.get_fov(cfg, self.KEY) == (25.6, "user")
+
+
+class TestNoNeedlessSaves:
+    KEY = "ids:1409:3060"
+
+    @staticmethod
+    def _count_saves(cfg, monkeypatch):
+        calls = []
+        real = cfg.save
+
+        def counting():
+            calls.append(1)
+            real()
+
+        monkeypatch.setattr(cfg, "save", counting)
+        return calls
+
+    def test_unchanged_last_camera_key_is_not_saved_again(self, tmp_path, monkeypatch):
+        cfg = ConfigManager(config_dir=tmp_path)
+        profiles.set_last_camera_key(cfg, self.KEY)
+        calls = self._count_saves(cfg, monkeypatch)
+        profiles.set_last_camera_key(cfg, self.KEY)
+        assert calls == []
+        profiles.set_last_camera_key(cfg, "other:key")
+        assert len(calls) == 1
+
+    def test_ensure_profile_and_unchanged_fov_are_not_saved_again(self, tmp_path, monkeypatch):
+        cfg = ConfigManager(config_dir=tmp_path)
+        profiles.set_fov(cfg, self.KEY, 25.6, "user")
+        calls = self._count_saves(cfg, monkeypatch)
+        profiles.ensure_profile(cfg, self.KEY)
+        profiles.set_fov(cfg, self.KEY, 25.6, "user")
+        assert calls == []
+        profiles.set_fov(cfg, self.KEY, 26.0, "user")
+        assert len(calls) == 1

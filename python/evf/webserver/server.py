@@ -93,9 +93,9 @@ class EngineActions(Protocol):
 
 def _compute_origin(
     config: ConfigManager,
-    fov_h: float = _FOV_H,
-    img_w: int = _IMG_W,
-    img_h: int = _IMG_H,
+    fov_h: float = _FOV_H,  # fork: camera-controls
+    img_w: int = _IMG_W,  # fork: camera-controls
+    img_h: int = _IMG_H,  # fork: camera-controls
 ) -> tuple[float, float]:
     """Pixel position of the sync offset (pointing center) in image coords.
 
@@ -680,7 +680,7 @@ class WebServer:
 
     def _build_nav(
         self, snap, target, origin_x, origin_y, dx_off, dy_off,
-        fov_h: float = _FOV_H, img_w: int = _IMG_W, img_h: int = _IMG_H,
+        fov_h: float = _FOV_H, img_w: int = _IMG_W, img_h: int = _IMG_H,  # fork: camera-controls
     ) -> dict | None:
         if not target.active:
             return None
