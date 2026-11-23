@@ -14,7 +14,7 @@ Rules:
   FOV. If two contain it, the narrower one wins. If none does, the closest
   range is used and the selection is flagged ``in_range=False``.
 * Only one database is loaded at a time (RAM matters on a Pi). A swap is
-  requested from any thread with :meth:`SolverDatabases.request` and carried
+  requested from any thread with :meth:`SolverDatabases.request_for_fov` and carried
   out by :meth:`SolverDatabases.apply_pending` **on the solver thread**,
   between two solves: the old database is dropped once the new one loaded.
 """
@@ -167,7 +167,7 @@ def _load_tetra3rs(path: Path) -> Any:
 class SolverDatabases:
     """Holds the registry and the one loaded database.
 
-    ``solver_db`` is read by whoever solves; the swap itself happens in
+    ``db`` is read by whoever solves; the swap itself happens in
     :meth:`apply_pending`, which the solver thread calls between two solves.
     ``loader`` is injectable so tests need not load 50 MB files.
     """
