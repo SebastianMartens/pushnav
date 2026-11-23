@@ -23,6 +23,13 @@ internal sealed record DeviceInfo(string BackendId, string Model, string? Serial
         : $"{BackendId}:{Model}";
 }
 
+/// <summary>Physical sensor of the opened camera (HELLO <c>capabilities.sensor</c>).</summary>
+/// <param name="Width">Full-frame width in pixels (not affected by binning).</param>
+/// <param name="Height">Full-frame height in pixels.</param>
+/// <param name="PixelSizeUm">Pixel pitch in micrometres, null when unknown.</param>
+/// <param name="Mono">The sensor has no color filter.</param>
+internal sealed record SensorInfo(int Width, int Height, double? PixelSizeUm, bool Mono);
+
 internal enum PixelFormat
 {
     Gray8,
@@ -98,6 +105,9 @@ internal interface ICameraBackend : IDisposable
 
     /// <summary>Frame rate announced as HELLO <c>default_fps</c>.</summary>
     int DefaultFps { get; }
+
+    /// <summary>Physical sensor size and pixel pitch for HELLO <c>capabilities.sensor</c>; null when the backend does not know it.</summary>
+    SensorInfo? Sensor => null;
 
     /// <summary>Snapshot of all controls with real units, ranges and current values. Thread-safe.</summary>
     IReadOnlyList<ControlDescriptor> Controls { get; }
