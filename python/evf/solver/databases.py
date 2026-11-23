@@ -20,6 +20,8 @@ Rules:
   running (camera connect, sync solve). Callers are serialised by a load lock,
   so two of them never load at the same time: the old database is dropped
   once the new one loaded.
+* Exception (spec 5.4.3): FOV search holds every database for its duration
+  (:meth:`SolverDatabases.hold_all`, :meth:`SolverDatabases.release_extras`).
 """
 
 from __future__ import annotations
@@ -225,6 +227,7 @@ class SolverDatabases:
         self._wanted = selection.info
         self._fov_deg = initial_fov_deg
         self._failed: DbInfo | None = None  # target whose load failed (no retry loop)
+        self._extras: dict[str, Any] = {}  # fork: FOV search: loaded besides the active one
 
     # -- read side ------------------------------------------------------------
 
@@ -255,6 +258,18 @@ class SolverDatabases:
 
     def select(self, fov_deg: float) -> DbSelection:
         return select_database(self._registry, fov_deg)
+
+    def db_for(self, info: DbInfo) -> Any | None:
+        """Handle of ``info``'s database if it is loaded (the active one, or held for FOV search)."""
+        with self._lock:
+            if info == self._active:
+                return self._db
+            return self._extras.get(info.name)
+
+    def loaded(self) -> list[DbInfo]:
+        """The databases whose handle is in memory, narrowest range first."""
+        with self._lock:
+            return [i for i in self._registry if i == self._active or i.name in self._extras]
 
     # -- swap -----------------------------------------------------------------
 
@@ -315,6 +330,36 @@ class SolverDatabases:
             self._active = pending
         logger.info("Solver database swapped: %s -> %s", old.name, pending.name)
         return True
+
+    # -- FOV search (spec 5.4.3 / 5.4.4) ----------------------------------------
+
+    def hold_all(self) -> None:
+        """Load every registered database that is not loaded yet and keep it.
+
+        Only for the duration of a FOV search, which alternates solves between
+        the databases. Callers queue on the load lock like a swap does; a
+        database that fails to load is skipped (ERROR logged).
+        """
+        for info in self._registry:
+            with self._load_lock:
+                with self._lock:
+                    if info == self._active or info.name in self._extras:
+                        continue
+                try:
+                    db = self._load(info)
+                except Exception as exc:  # noqa: BLE001 - search with what is loaded
+                    logger.error("Failed to load solver database %r from %s: %s", info.name, info.path, exc)
+                    continue
+                with self._lock:
+                    self._extras[info.name] = db
+
+    def release_extras(self) -> None:
+        """Drop the databases ``hold_all`` loaded; the active one stays."""
+        with self._lock:
+            dropped = list(self._extras)
+            self._extras.clear()
+        if dropped:
+            logger.info("Released solver databases held for the FOV search: %s", ", ".join(dropped))
 
     # -- internals ------------------------------------------------------------
 

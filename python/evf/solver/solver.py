@@ -93,12 +93,14 @@ class PlateSolver:
         image_bytes: bytes,
         fov_estimate_deg: float,
         fov_max_error_deg: float,
+        database: DbInfo | None = None,  # fork: camera-controls (FOV search)
     ) -> dict:
         """Solve a single image frame. Returns a tetra3-compatible result dict.
 
         ``fov_estimate_deg`` / ``fov_max_error_deg`` are the horizontal FOV
         guess and its tolerance (legacy setup: 8.86 / 1.5, see
-        ``evf.solver.fov``).
+        ``evf.solver.fov``). ``database`` solves against that registry entry
+        instead of the active one (FOV search holds both, spec 5.4.4).
 
         Keys returned (preserving the legacy contract):
           RA, Dec, Roll          — degrees, J2000
@@ -110,6 +112,7 @@ class PlateSolver:
           matched_centroids      — list[[y, x], ...] top-left-origin pixels
           matched_stars          — list[[ra_deg, dec_deg, mag], ...]
           image_size             — (height, width)
+          fov_deg                — solved horizontal FOV in degrees, None if not solved
 
         On unsolvable frames, RA/Dec/Roll are None, Matches=0, Prob=None,
         and the matched_* lists are empty. all_centroids is populated
@@ -126,6 +129,10 @@ class PlateSolver:
         all_centroids = self._centroids_list_to_yx(extraction.centroids, h, w)
 
         db = self._databases.db  # one handle for the whole solve, even across a swap
+        if database is not None:  # fork: camera-controls
+            db = self._databases.db_for(database)
+            if db is None:
+                raise RuntimeError(f"solver database {database.name!r} is not loaded")
         t0 = time.monotonic()
         result = db.solve_from_centroids(
             extraction.centroids,
@@ -147,6 +154,7 @@ class PlateSolver:
             "matched_centroids": [],
             "matched_stars": [],
             "image_size": (h, w),
+            "fov_deg": None,  # fork: camera-controls
         }
 
         # result.status is a plain str from the pyo3 binding (not a Python
@@ -172,6 +180,7 @@ class PlateSolver:
             "Roll": roll,
             "Matches": result.num_matches or 0,
             "Prob": result.probability,
+            "fov_deg": result.fov_deg,  # fork: camera-controls (FOV learning)
             "matched_centroids": matched_centroids,
             "matched_stars": matched_stars,
         })

@@ -763,6 +763,7 @@ class Engine:
                 self._config,
                 audio=self._audio,
                 solver_params=self._camera_profile.params,  # fork: camera-controls
+                fov_tracker=self._camera_profile,  # fork: camera-controls (FOV learning, search)
             )
             # Wire solver failure count into web server for audio event detection
             if self._webserver is not None:
@@ -849,12 +850,8 @@ class Engine:
             # fork: camera-controls: no solver thread runs in SYNC, so a pending
             # database swap (new camera / FOV) is done here, before the solve.
             self._solver.apply_pending_database()
-            params = self._camera_profile.params.get()
-            result = self._solver.solve_frame(
-                frame_data,
-                params.fov_estimate_deg,
-                params.fov_max_error_deg,
-            )
+            # fork: camera-controls: the profile FOV; during a FOV search, every database in turn
+            result = self._camera_profile.solve_for_sync(self._solver, frame_data)
             if not PlateSolver.is_valid(
                 result, self._config.min_matches, self._config.max_prob
             ):
@@ -1044,13 +1041,36 @@ class Engine:
         """
         try:
             self._camera_profile.on_camera_connected(hello)
-            # With no solver thread running, nothing else would load a database
-            # that fits the new FOV before the user starts tracking; the swap takes
-            # ~0.15 s and no solve is in progress. A running thread does it itself.
-            if self._solver is not None and not (self._solver_thread and self._solver_thread.running):
-                self._solver.apply_pending_database()
+            self._fork_apply_database()
         except Exception as exc:
             logger.error("Could not activate the camera profile: %s", exc)
+
+    def _fork_apply_database(self) -> None:
+        """fork: camera-controls. Load the database a FOV change asked for, if no solver thread will.
+
+        With no solver thread running, nothing else would load a database that fits
+        the new FOV before the user starts tracking; the swap takes ~0.15 s and no
+        solve is in progress. A running thread does it itself between two solves.
+        """
+        if self._solver is not None and not (self._solver_thread and self._solver_thread.running):
+            self._solver.apply_pending_database()
+
+    def set_camera_fov(
+        self,
+        focal_length_mm: object = None,
+        fov_h_deg: object = None,
+        reset: bool = False,
+    ) -> dict:
+        """fork: camera-controls. ``POST /api/camera/fov`` (spec 6.1).
+
+        Raises ``FovRequestError`` (HTTP 400) or ``NoCameraConnected`` (HTTP 409);
+        returns the new FOV state.
+        """
+        self._camera_profile.set_user_fov(
+            focal_length_mm=focal_length_mm, fov_h_deg=fov_h_deg, reset=reset,
+        )
+        self._fork_apply_database()  # the answer shows the database that is loaded now
+        return self._camera_profile.fov_payload()
 
     def _log_version(self) -> None:
         try:
