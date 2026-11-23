@@ -87,7 +87,18 @@ export interface CameraBlock {
   connected: boolean;
   all_centroids: number[][] | null;     // [[y, x], ...]
   matched_centroids: number[][] | null; // [[y, x], ...]
+  // fork: camera-controls (spec 6.1, 6.3). null while no camera is connected.
+  camera_model?: string | null;
+  backend?: string | null;
+  camera_key?: string | null;
+  /** Physical sensor width from HELLO (C# server only); needed to turn a focal length into a FOV. */
+  sensor_width_mm?: number | null;
+  /** Focal length behind the current FOV (user or learned), when the sensor size is known. */
+  focal_length_mm?: number | null;
 }
+
+/** How the FOV was set; "searching" while the FOV search runs (spec 5.4.4), "default" = legacy 8.86°. */
+export type FovSource = "user" | "learned" | "searching" | "default";
 
 /** A Stellarium/LX200 server that failed to start (e.g. its port is in use). */
 export interface ServerError {
@@ -107,6 +118,11 @@ export interface EnginePayload {
   image_h: number;
   finder_rotation: number;
   fov_h_deg: number;
+  fov_source: FovSource;
+  /** Loaded solver database ("narrow" / "wide"); null before the solver is loaded. */
+  solver_db: string | null;
+  /** True when no solver database covers the FOV (Settings shows a hint). */
+  fov_out_of_range: boolean;
   has_calibration: boolean;
   image_size: [number, number] | null;
   controls: ControlDescriptor[];

@@ -23,6 +23,10 @@ export const api = {
     return await resp.json();
   },
   setControl: (name: string, value: number) => post("/api/control", { name, value }),
+  /** Set (focal length or degrees) or reset the connected camera's FOV (spec 6.1). */
+  setCameraFov: (
+    body: { focal_length_mm: number } | { fov_h_deg: number } | { reset: true },
+  ) => post("/api/camera/fov", body),
   clearGoto: () => post("/api/goto/clear"),
   setGoto: (ra_deg: number, dec_deg: number) =>
     post("/api/goto/set", { ra_deg, dec_deg }),

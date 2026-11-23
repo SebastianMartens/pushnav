@@ -4,6 +4,7 @@ import { Separator } from "@/components/ui/separator";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { api } from "@/lib/api";
+import { CameraFov } from "./CameraFov"; // fork: camera-controls
 import { cn } from "@/lib/utils";
 import type { EnginePayload } from "@/lib/types";
 
@@ -51,6 +52,8 @@ export function Settings({ state, showStars, setShowStars, className }: Props) {
             onCheckedChange={(v) => api.setSettings({ audio_enabled: v })}
           />
         </Row>
+        <Separator />
+        <CameraFov state={state} />{/* fork: camera-controls */}
         <Separator />
         <div className="space-y-2">
           <div className="text-sm font-medium text-primary">
