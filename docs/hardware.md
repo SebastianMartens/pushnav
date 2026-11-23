@@ -78,7 +78,21 @@ PushNav also works with **IDS uEye** industrial cameras on Windows. The model it
 
 **Choosing the camera server.** The default `"dotnet"` starts the C# server first and falls back to the original C server when the C# server finds no supported camera (that is how the OV9281 modules keep working). To force one of them set `camera.windows_server` to `"dotnet"` or `"c"` in the config file, or set the environment variable `PUSHNAV_CAMERA_SERVER` for a single run. `camera_server_dotnet.exe --list` prints the cameras it sees and their controls as JSON, which is the first thing to check when a camera is not found.
 
-**Lens and plate solving.** The reference setup is a 25 mm lens on this sensor, a field of 25.6° × 16.2°. The star catalog shipped with PushNav is built for a 7° to 10° field, so plate solving with this camera needs a wide-field catalog that does not exist yet (tracked in [issue #3](https://github.com/SebastianMartens/pushnav/issues/3)). Until then the camera shows its live image in the app but will not solve.
+**Lens and plate solving.** The reference setup is a 25 mm lens on this sensor, a field of 25.6° × 16.2°. PushNav ships two star catalogs: the original one for a 7° to 10° field (the OV9281 setup) and a wide-field one for 18° to 32°, and it loads the one that fits the camera's field of view. That field of view is stored per camera in the config file, because it depends on the lens, not only on the sensor.
+
+Until the Settings panel has a field for it (tracked in [issue #3](https://github.com/SebastianMartens/pushnav/issues/3)), enter it by hand. Start PushNav once with the camera connected, quit it, then open `config.json` (Windows: `%APPDATA%\ElectronicViewfinder\config.json`) and fill in the camera's block under `camera` → `profiles`:
+
+```json
+"profiles": {
+  "ids:1409:3060": {
+    "controls": {},
+    "fov_h_deg": 25.6,
+    "fov_source": "user"
+  }
+}
+```
+
+`fov_h_deg` is the horizontal field of view in degrees (25.6 for this sensor with a 25 mm lens; for another lens it is `2 × atan(11.35 mm / (2 × focal length))`). The key `ids:1409:3060` is the camera's id and is created by the first start; the app log shows it as `Camera profile 'ids:1409:3060'`. Without a value PushNav assumes the 8.86° of the OV9281 setup and the original catalog, which cannot solve a 25 mm lens on this sensor reliably. A value outside 7°–10° and 18°–32° is accepted but no catalog covers it, so solving is unlikely to work. The image size follows the camera by itself (1936 × 1216 for this one).
 
 ## Adding Support for More Cameras
 

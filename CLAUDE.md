@@ -110,6 +110,7 @@ python/evf/                     # main Python package
     pointing.py                 # telescope pointing state
     navigation.py               # goto-target navigation logic
     goto_target.py              # thread-safe goto target container
+    camera_profile.py           # fork: active camera profile, solver FOV, stream geometry for the web server
     sample_injector.py          # dev-mode sample-image injector
     audio.py                    # audio feedback (lock/lost sounds)
     epoch.py                    # J2000 <-> JNow precession (pyerfa)
@@ -117,11 +118,12 @@ python/evf/                     # main Python package
     client.py                   # camera TCP client
     protocol.py                 # camera protocol (de)serialization
     subprocess_mgr.py           # camera subprocess lifecycle manager
+    stream.py                   # fork: stream geometry (HELLO size, corrected by the first frame)
   solver/                       # tetra3rs (Rust) plate-solving
     solver.py                   # solver wrapper
     thread.py                   # solver worker thread
     databases.py                # fork: solver-database registry, selection, swap (narrow/wide)
-    fov.py                      # fork: solver FOV parameters (SolverParams)
+    fov.py                      # fork: solver FOV parameters (SolverParams), FOV resolution, SolverParamsHolder
     sync.py                     # multi-star sync / calibration
   stellarium/                   # Stellarium telescope protocol server
     server.py                   # TCP server for Stellarium connection
@@ -133,6 +135,7 @@ python/evf/                     # main Python package
     server.py                   # serves React build, MJPEG, /ws, /api/*
   config/                       # configuration
     manager.py                  # JSON config read/write
+    profiles.py                 # fork: per-camera profiles (camera key, FOV) in config.json
     logging_setup.py            # logging configuration
 web/                            # React + Vite + TS + Tailwind + shadcn/ui front-end
   package.json
@@ -261,8 +264,14 @@ registry and the `solver_db_version*` keys in `VERSION.json`. Builds are not byt
 (same sizes and counts, different bytes), so do not regenerate the narrow file without a reason.
 `evf.solver.databases` reads the registry (`evf.paths.solver_db_dir()`), picks the database whose
 range contains the FOV, and keeps only one loaded; a swap runs on the solver thread
-(`PlateSolver.apply_pending_database()`). Today the engine always selects the narrow database and
-passes 8.86 deg / 1.5 deg to `PlateSolver.solve_frame(image, fov_estimate_deg, fov_max_error_deg)`.
+(`PlateSolver.apply_pending_database()`). The FOV comes from the connected camera's profile
+(`camera.profiles[<camera key>].fov_h_deg`, key = HELLO `camera_key` or `<backend>:<camera_model>`, see
+`evf.config.profiles` and `evf.engine.camera_profile`); the engine loads the database for
+`camera.last_camera_key` at startup and requests the right one on camera connect, and passes
+`fov` / `max(1.5, 0.10 * fov)` to `PlateSolver.solve_frame(image, fov_estimate_deg, fov_max_error_deg)`
+through a lock-protected `SolverParams` holder. With no profile FOV it is today's behaviour: the narrow
+database, 8.86 deg / 1.5 deg, 1280x720. Until the Settings field exists (spec slice S2) enter the FOV by
+hand, see `docs/hardware.md`.
 
 ## Architecture Rules
 

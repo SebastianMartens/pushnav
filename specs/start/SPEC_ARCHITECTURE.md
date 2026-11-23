@@ -428,13 +428,62 @@ Bundled `data/tetra3rs_gaia.bin` (~50 MB, Gaia DR3 to magnitude 8, ~62.8k stars,
 
 Load only once. Expect ~0.1s load time — the Rust solver loads the prebuilt catalog far faster than the old Python tetra3.
 
+Fork (`specs/camera-server/SPEC_CAMERA_CONTROLS.md` §5.4): two databases ship, listed with their FOV
+ranges in `data/solver_dbs.json` (read by `evf/solver/databases.py`):
+
+| Name | File | FOV range | Magnitude | Size |
+|---|---|---|---|---|
+| `narrow` | `tetra3rs_gaia.bin` | 7–10° | ≤ 8 | ~50 MB |
+| `wide` | `tetra3rs_gaia_wide.bin` | 18–32° | ≤ 7 | ~10 MB |
+
+The active database is the one whose range contains the profile FOV (§8.1); the narrower one if two
+do; the closest, with the `fov_out_of_range` state flag, if none does. **Only one is loaded at a
+time.** At startup the engine loads the one for the FOV of `camera.last_camera_key` (the narrow one
+without a last camera, as before). On camera connect, and whenever the profile FOV moves into another
+range, the engine requests the other database; the solver thread swaps it in between two solves
+(`PlateSolver.apply_pending_database()`), and the engine does it at once when no solver thread runs.
+A registry that cannot provide `narrow` (missing file, bad range, only `wide` listed) fails loudly at
+startup instead of selecting `wide` for the 8.86° setup.
+
 ### 8.1 Camera Optical Geometry
+
+The FOV is a property of camera plus lens, so it is stored **per camera profile**
+(`camera.profiles[<camera key>].fov_h_deg`, horizontal, whole sensor width, independent of binning)
+and not fixed. The legacy setup (OV9281 with the stock lens) is the default when a profile has no FOV:
 
 Field of view:   8.86 x 4.98 degrees
 Radius:          5.081 degrees
 Pixel scale:     24.9 arcsec/pixel
 
-The `fov_estimate` parameter uses the horizontal FOV (8.86 deg), NOT the diagonal or radius.
+The `fov_estimate` parameter uses the horizontal FOV (8.86 deg for the legacy setup), NOT the diagonal or radius.
+
+Resolution (`evf/solver/fov.py`, `SPEC_CAMERA_CONTROLS.md` §5.2; only steps 1 and 4 are implemented so far):
+
+1. `profiles[key].fov_h_deg` when it is set (`fov_source` `"user"`, or `"learned"` in a later release).
+   Until the Settings field exists, enter it by hand in `config.json` (see `docs/hardware.md`).
+2. *(not yet)* from a focal length and the sensor size.
+3. *(not yet)* FOV search.
+4. Otherwise 8.86° with the narrow database, exactly as before profiles existed.
+
+A stored value that is not a finite number > 0 is ignored with a warning (step 4). The solver gets
+`fov_estimate_deg = fov` and `fov_max_error_deg = max(1.5, 0.10 * fov)` (1.5° at 8.86°, 2.56° at 25.6°),
+read from an engine-owned, lock-protected `SolverParams` holder at the start of every solve, so a
+profile change applies to the next frame.
+
+The profile key is HELLO `camera_key` when the camera server sends it (the C# server does, in every
+session, e.g. `ids:1409:3060`), else `"<backend>:<camera_model>"`. A profile is created on first
+connect; `camera.last_camera_key` remembers the last one.
+
+| Setup | Sensor | Pixels | Lens | FOV (h x v) | Plate scale 1x1 |
+|---|---|---|---|---|---|
+| Legacy (default) | OV9281 | 1280x720 | stock | 8.86° x 4.98° | 24.9"/px |
+| IDS reference | IMX174 (UI-306xCP-M), 5.86 µm | 1936x1216 | 25 mm | 25.6° x 16.2° | 48.3"/px |
+
+Image size is not fixed either: the web server and the overlays use the stream geometry, which for a
+v1 camera session is HELLO `default_width` x `default_height`, corrected by the first frame after
+connect (1280x720 while no camera is connected). `/ws` carries `image_w`, `image_h`, `fov_h_deg`,
+`fov_source` (`"user"`, `"learned"` or `"default"`), `solver_db` (the loaded database) and
+`fov_out_of_range`; the sync origin and the navigation projection use the same values.
 
 ### 8.2 Two-Step Solve (Per Frame)
 
@@ -636,7 +685,8 @@ Default configuration:
 {
   "version": 1,
   "solver": {"min_matches": 8, "max_prob": 0.2},
-  "camera": {"exposure": null, "gain": null},
+  "camera": {"exposure": null, "gain": null, "max_exposure_us": 4000000,
+             "last_camera_key": null, "profiles": {}},
   "calibration": {"finder_rotation": 0.0, "sync_d_body": null},
   "logging": {"verbose": false},
   "audio": {"enabled": true},
@@ -649,6 +699,13 @@ Notes on specific fields:
 - `camera.exposure` / `camera.gain` default to `null`. On the first camera
   HELLO, the engine seeds them to the midpoint of the reported control range
   and persists the values from there on.
+- `camera.profiles` (fork, `SPEC_CAMERA_CONTROLS.md` §4) holds one block per camera key, e.g.
+  `"ids:1409:3060": {"controls": {}, "fov_h_deg": 25.6, "fov_source": "user"}`. `fov_h_deg` is the
+  horizontal FOV in degrees (§8.1), `fov_source` is `"user"` or `"learned"`; `controls` is reserved for the
+  saved camera controls. `camera.last_camera_key` is the key of the last connected camera and picks the
+  solver database loaded at startup. `camera.max_exposure_us` (default 4 s) caps the exposure slider
+  once the camera controls land. `CONFIG_VERSION` stays 1: a version change resets the whole file,
+  so these keys are only ever added and picked up from the defaults.
 - HiDPI scaling is handled natively by each platform's webview (WKWebView on
   macOS, WebKit2GTK on Linux, WebView2 on Windows) against the OS DPI/scale
   settings — no app-side multiplier or toggle.
