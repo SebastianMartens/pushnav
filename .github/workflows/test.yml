@@ -1,7 +1,7 @@
 name: Test
 
 # Fast checks on every PR and on main. Release builds live in build.yml
-# (tags / manual only) and the docs site in docs.yml.
+# (tags / manual only) and the docs site build check in docs.yml.
 
 on:
   pull_request:
