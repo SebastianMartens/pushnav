@@ -102,6 +102,7 @@ class TestSubprocessManager:
         assert hello["stream_format"] == "MJPEG"
         assert mgr.running
         assert mgr.client is not None
+        assert mgr.client.session_version == 1  # fork: camera-controls
         assert len(mgr.client.controls) == 2
         ids = {c["id"] for c in mgr.client.controls}
         assert "exposure" in ids

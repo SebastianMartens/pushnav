@@ -4,9 +4,9 @@
 """Per-camera profiles in ``config.json`` (``camera.profiles``).
 
 A profile belongs to one camera model and carries what depends on camera and
-lens: the saved control values (later slices) and the horizontal FOV. Slice S1
-only needs the key rule, ``fov_h_deg`` / ``fov_source`` and
-``camera.last_camera_key``.
+lens: the saved control values (``controls``: ``{"value": v, "unit": u}`` per
+control id, spec 4.2) and the horizontal FOV (``fov_h_deg`` / ``fov_source``).
+``camera.last_camera_key`` names the last connected camera.
 
 Profile key (spec 4.2): HELLO ``camera_key`` when the camera server sends it,
 in v1 and v2 sessions alike; else ``"<backend>:<camera_model>"`` from HELLO.
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import threading
 from typing import Any
 
 from evf.config.manager import ConfigManager
@@ -27,6 +28,12 @@ from evf.config.manager import ConfigManager
 logger = logging.getLogger(__name__)
 
 _SECTION = "camera"
+
+# Every read-modify-write of ``camera.profiles`` below copies the whole dict, changes it and
+# writes it back. The solver thread (FOV learning), the web server (user FOV, controls) and the
+# camera threads all do that, so without one lock a slow writer can undo a faster one's change
+# (a learned or user FOV wiped by a control save). Re-entrant: save_control calls ensure_profile.
+_PROFILES_LOCK = threading.RLock()
 
 
 def camera_key_from_hello(hello: dict[str, Any] | None) -> str | None:
@@ -69,18 +76,19 @@ def ensure_profile(config: ConfigManager, key: str) -> dict[str, Any]:
     Missing parts of an existing profile (a hand-written one with only
     ``fov_h_deg``, say) are filled in so readers can rely on the three keys.
     """
-    profiles = copy.deepcopy(_profiles(config))
-    existing = profiles.get(key)
-    profile = existing if isinstance(existing, dict) else {}
-    completed = {**new_profile(), **profile}
-    if not isinstance(completed["controls"], dict):
-        completed["controls"] = {}
-    if profiles.get(key) != completed:
-        profiles[key] = completed
-        config.set(_SECTION, "profiles", profiles)
-        if existing is None:
-            logger.info("Created camera profile %r", key)
-    return copy.deepcopy(completed)
+    with _PROFILES_LOCK:
+        profiles = copy.deepcopy(_profiles(config))
+        existing = profiles.get(key)
+        profile = existing if isinstance(existing, dict) else {}
+        completed = {**new_profile(), **profile}
+        if not isinstance(completed["controls"], dict):
+            completed["controls"] = {}
+        if profiles.get(key) != completed:
+            profiles[key] = completed
+            config.set(_SECTION, "profiles", profiles)
+            if existing is None:
+                logger.info("Created camera profile %r", key)
+        return copy.deepcopy(completed)
 
 
 def get_fov(config: ConfigManager, key: str) -> tuple[Any, Any]:
@@ -97,12 +105,47 @@ def get_fov(config: ConfigManager, key: str) -> tuple[Any, Any]:
 
 def set_fov(config: ConfigManager, key: str, fov_h_deg: float | None, source: str | None) -> None:
     """Store the profile FOV (None clears it). Creates the profile if needed."""
-    profile = ensure_profile(config, key)
-    profile["fov_h_deg"] = fov_h_deg
-    profile["fov_source"] = source if fov_h_deg is not None else None
-    profiles = copy.deepcopy(_profiles(config))
-    profiles[key] = profile
-    config.set(_SECTION, "profiles", profiles)
+    with _PROFILES_LOCK:
+        profile = ensure_profile(config, key)
+        profile["fov_h_deg"] = fov_h_deg
+        profile["fov_source"] = source if fov_h_deg is not None else None
+        profiles = copy.deepcopy(_profiles(config))
+        profiles[key] = profile
+        config.set(_SECTION, "profiles", profiles)
+
+
+def get_saved_control(config: ConfigManager, key: str, control_id: str) -> dict[str, Any] | None:
+    """The saved ``{"value": ..., "unit": ...}`` of a control (a copy), None if there is none.
+
+    ``unit`` is absent for controls without one (binning). An entry that is not
+    an object with a ``value`` (a hand-edited file) counts as not saved.
+    """
+    profile = _profiles(config).get(key)
+    controls = profile.get("controls") if isinstance(profile, dict) else None
+    entry = controls.get(control_id) if isinstance(controls, dict) else None
+    if not isinstance(entry, dict) or "value" not in entry:
+        return None
+    return dict(entry)
+
+
+def save_control(
+    config: ConfigManager, key: str, control_id: str, value: Any, unit: str | None = None
+) -> None:
+    """Save a control value in the profile (spec 4.2): ``{"value": v, "unit": u}``, no ``unit`` if None.
+
+    Creates the profile if needed and writes the file only when the entry changes.
+    """
+    with _PROFILES_LOCK:
+        profile = ensure_profile(config, key)
+        entry: dict[str, Any] = {"value": value}
+        if unit is not None:
+            entry["unit"] = unit
+        if profile["controls"].get(control_id) == entry:
+            return
+        profile["controls"][control_id] = entry
+        profiles = copy.deepcopy(_profiles(config))
+        profiles[key] = profile
+        config.set(_SECTION, "profiles", profiles)
 
 
 def last_camera_key(config: ConfigManager) -> str | None:

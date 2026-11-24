@@ -36,18 +36,25 @@ MSG_HELLO = 0x00
 MSG_FRAME = 0x01
 MSG_CONTROL_INFO = 0x02
 MSG_ERROR = 0x03
+# fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md; protocol v2, SPEC_PROTOCOL_CAMERA.md section 11)
+MSG_STREAM_INFO = 0x04
+MSG_FRAME_RAW = 0x05
 
 # -- Message types (app → camera) -------------------------------------------
 MSG_SET_CONTROL = 0x11
 MSG_GET_CONTROLS = 0x12
+MSG_SET_STREAM_CONFIG = 0x15  # fork: camera-controls (protocol v2)
 
 _TYPE_NAMES = {
     MSG_HELLO: "HELLO",
     MSG_FRAME: "FRAME",
     MSG_CONTROL_INFO: "CONTROL_INFO",
     MSG_ERROR: "ERROR",
+    MSG_STREAM_INFO: "STREAM_INFO",  # fork: camera-controls
+    MSG_FRAME_RAW: "FRAME_RAW",  # fork: camera-controls
     MSG_SET_CONTROL: "SET_CONTROL",
     MSG_GET_CONTROLS: "GET_CONTROLS",
+    MSG_SET_STREAM_CONFIG: "SET_STREAM_CONFIG",  # fork: camera-controls
 }
 
 

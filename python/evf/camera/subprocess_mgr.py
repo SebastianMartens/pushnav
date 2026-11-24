@@ -30,6 +30,8 @@ from pathlib import Path
 
 from evf.camera import server_select  # fork: camera-server-dotnet (see specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md section 8)
 from evf.camera.client import CameraClient
+from evf.camera.controls import restore_controls  # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+from evf.camera.stream import stall_since_last_activity  # fork: camera-controls
 from evf.config.manager import ConfigManager
 from evf.engine.frame_buffer import LatestFrame
 from evf.engine.state import EngineState, StateMachine
@@ -312,12 +314,9 @@ class SubprocessManager:
                 return
             # Detect frame stall (socket open but no frames arriving)
             if client.last_frame_time > 0:
-                stall = time.monotonic() - client.last_frame_time
-                if stall > self._FRAME_STALL_TIMEOUT:
-                    logger.warning(
-                        "No frames for %.1fs — treating as stall, starting recovery",
-                        stall,
-                    )
+                stall, timeout = self._fork_stall(client)  # fork: camera-controls
+                if stall > timeout:  # fork: camera-controls
+                    self._fork_log_stall(client, stall, timeout)  # fork: camera-controls (the upstream warning, v1 text unchanged)
                     self._start_recovery()
                     return
 
@@ -355,10 +354,7 @@ class SubprocessManager:
                     self._fork_recovered(hello)  # fork: camera-controls
                     self._client.start_receiving()
                     # Restore camera settings from config
-                    if self._config.exposure is not None:
-                        self._client.set_control("exposure", self._config.exposure)
-                    if self._config.gain is not None:
-                        self._client.set_control("gain", self._config.gain)
+                    restore_controls(self._client, self._config)  # fork: camera-controls
                     self._state_machine.transition(EngineState.SETUP)
                     logger.info("Recovery succeeded on attempt %d", i + 1)
                     self._start_monitor()
@@ -427,6 +423,34 @@ class SubprocessManager:
         """The server that connected is the one recovery attempts start with (spec 8.2)."""
         if self._server_plan is not None and self._fork_running is not None:
             self._server_plan.switch_to(self._fork_running)
+
+    def _fork_stall(self, client: CameraClient) -> tuple[float, float]:
+        """fork: camera-controls (spec 3.3). ``(seconds without frames, stall timeout)``.
+
+        v1: the fixed 2.0 s since the last FRAME, as always. v2:
+        ``max(2.0, 2 * frame interval + 1.0)`` from the latest STREAM_INFO, counted from
+        the last message of any type, and suspended (for up to 5 s) while the camera
+        says it is reconfiguring the stream.
+        """
+        now = time.monotonic()
+        if client.session_version < 2:
+            return now - client.last_frame_time, self._FRAME_STALL_TIMEOUT
+        return stall_since_last_activity(
+            now, client.last_activity_time, self._FRAME_STALL_TIMEOUT, client.stream_info)
+
+    @staticmethod
+    def _fork_log_stall(client: CameraClient, stall: float, timeout: float) -> None:
+        """fork: camera-controls. A v1 session logs what it always did; v2 counts any message."""
+        if client.session_version < 2:
+            logger.warning(
+                "No frames for %.1fs — treating as stall, starting recovery",
+                stall,
+            )
+        else:
+            logger.warning(
+                "No message from the camera for %.1fs (limit %.1fs) — treating as stall, starting recovery",
+                stall, timeout,
+            )
 
     def _fork_recovered(self, hello: dict) -> None:
         """fork: camera-controls. Tell the engine which camera answered after a recovery."""

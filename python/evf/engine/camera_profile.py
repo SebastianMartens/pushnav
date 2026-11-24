@@ -23,9 +23,9 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-from evf.camera.stream import GeometryTracker, jpeg_size
+from evf.camera.stream import FrameSizeGuard, GeometryTracker, jpeg_size
 from evf.config import profiles
 from evf.config.manager import ConfigManager
 from evf.engine.frame_buffer import LatestFrame
@@ -47,6 +47,9 @@ from evf.solver.fov import (
 from evf.solver.fov_learning import FovLearner
 from evf.solver.fov_search import FovSearch, guess_fov_from_sensor
 from evf.solver.solver import PlateSolver
+
+if TYPE_CHECKING:
+    from evf.camera.client import CameraClient
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +95,7 @@ class CameraProfile:
         self._get_solver = get_solver
         self._params = SolverParamsHolder()
         self._geometry = GeometryTracker()
+        self._frame_size_guard = FrameSizeGuard(self._geometry.authoritative)
         self._active_key: str | None = None
         # Slice S2. The solver thread (learning, search), the web server (user FOV)
         # and the engine (camera connect) all change the FOV: serialise them.
@@ -111,6 +115,11 @@ class CameraProfile:
     @property
     def geometry(self) -> GeometryTracker:
         return self._geometry
+
+    @property
+    def frame_size_guard(self) -> FrameSizeGuard:
+        """Tells the solver thread which results to drop: frames of another size than announced (spec 5.1)."""
+        return self._frame_size_guard
 
     @property
     def active_key(self) -> str | None:
@@ -143,10 +152,15 @@ class CameraProfile:
 
     # -- camera connect --------------------------------------------------------
 
-    def on_camera_connected(self, hello: dict) -> None:
-        """A camera answered HELLO: activate its profile, FOV and geometry."""
+    def on_camera_connected(self, hello: dict, client: CameraClient | None = None) -> None:
+        """A camera answered HELLO: activate its profile, FOV and geometry.
+
+        ``client`` (the connected ``CameraClient``) matters in a v2 session only: its
+        STREAM_INFO is the geometry (spec 5.1). A v1 session takes HELLO's size.
+        """
         with self._lock:
-            self._geometry.connect(hello)
+            v2 = client is not None and client.session_version >= 2
+            self._geometry.connect(hello, (lambda: client.stream_info) if v2 else None)
             key = profiles.camera_key_from_hello(hello)
             self._active_key = key
             self._hello = dict(hello) if isinstance(hello, dict) else None

@@ -56,6 +56,7 @@ class SolverThread:
         audio: AudioAlert | None = None,
         solver_params: SolverParamsHolder | None = None,  # fork: camera-controls
         fov_tracker=None,  # fork: camera-controls: engine.camera_profile.CameraProfile (FOV learning, search)
+        frame_size_guard=None,  # fork: camera-controls: evf.camera.stream.FrameSizeGuard (spec 5.1)
     ) -> None:
         self._solver = solver
         self._frame_buffer = frame_buffer
@@ -67,6 +68,7 @@ class SolverThread:
         # The engine's holder; a standalone thread solves the legacy 8.86 deg / 1.5 deg.
         self._solver_params = solver_params if solver_params is not None else SolverParamsHolder()
         self._fov_tracker = fov_tracker
+        self._frame_size_guard = frame_size_guard
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._consecutive_failures = 0
@@ -283,6 +285,9 @@ class SolverThread:
                 if self._audio and new_count == self._AUDIO_FAIL_THRESHOLD:
                     self._audio.on_failure_count_changed(new_count)
                 continue
+
+            if self._frame_size_guard is not None and not self._frame_size_guard.accepts(result):  # fork: camera-controls
+                continue  # a frame of the old size: not a failure (no lost sound, no FOV-learning reset)
 
             if self._solver.is_valid(
                 result,
