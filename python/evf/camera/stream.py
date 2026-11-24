@@ -277,6 +277,54 @@ def stall_since_last_activity(
     return now - last_activity, timeout
 
 
+class StreamStatus:
+    """What ``/ws`` shows of the camera session: ``protocol_version`` and ``camera.stream`` (spec 6.1).
+
+    The engine's STREAM_INFO handler is the one dispatch point: it calls
+    ``stream_info_arrived()`` next to its own work. ``payload()`` is read by the web server.
+
+    A new generation clears the frame buffer (spec 3.2), so ``camera.connected`` reads false from
+    that STREAM_INFO until the first frame of the new size. For that gap (at most
+    ``RECONFIGURE_GRACE_S``) ``payload()`` reports the state ``"reconfiguring"`` instead of the
+    announced ``"streaming"``: the UI shows "Reconfiguring camera" and not a lost camera.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._awaiting_generation: int | None = None
+        self._awaiting_since = 0.0
+
+    def reset(self) -> None:
+        """A new session (connect or recovery): generations start again, nothing is awaited."""
+        with self._lock:
+            self._awaiting_generation = None
+
+    def stream_info_arrived(self, info: StreamInfo, new_generation: bool, now: float) -> None:
+        if new_generation:
+            with self._lock:
+                self._awaiting_generation = info.generation
+                self._awaiting_since = now
+
+    def payload(self, client, has_frame: bool, now: float) -> dict:
+        """``{"protocol_version": 1 | 2 | None, "stream": dict | None}`` for the ``camera`` block.
+
+        None / None without a connected client; ``stream`` is None in a v1 session.
+        """
+        if client is None or not client.connected:
+            return {"protocol_version": None, "stream": None}
+        if client.session_version < 2 or client.stream_info is None:
+            return {"protocol_version": client.session_version, "stream": None}
+        info = client.stream_info
+        stream = info.to_dict()
+        with self._lock:
+            if has_frame:
+                self._awaiting_generation = None
+            elif (self._awaiting_generation == info.generation
+                    and now - self._awaiting_since <= RECONFIGURE_GRACE_S):
+                stream["state"] = STATE_RECONFIGURING
+        return {"protocol_version": client.session_version, "stream": stream}
+
+
 class GeometryTracker:
     """Engine-owned, lock-protected current stream geometry.
 

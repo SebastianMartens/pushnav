@@ -43,7 +43,8 @@ from evf.engine.status_led import StatusLedController, find_leds
 from evf.solver.solver import PlateSolver
 # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
 from evf.engine.camera_profile import CameraProfile
-from evf.camera.controls import remember_control, restore_controls
+from evf.camera.controls import capped_controls, remember_control, restore_controls, validate_control_request
+from evf.camera.stream import StreamStatus
 import numpy as np
 
 from evf.solver.sync import (
@@ -153,6 +154,7 @@ class Engine:
         self._camera_profile = CameraProfile(
             self._config, self._frame_buffer, lambda: self._solver
         )
+        self._stream_status = StreamStatus()  # what /ws shows of the stream (spec 6.1)
 
         # Components (created during startup)
         self._solver: PlateSolver | None = None
@@ -244,8 +246,17 @@ class Engine:
     def camera_controls(self) -> list[dict] | None:
         """Return the current camera controls, or None if not connected."""
         if self._subprocess_mgr and self._subprocess_mgr.client:
-            return self._subprocess_mgr.client.controls
+            # fork: camera-controls (spec 4.1): the exposure cap of camera.max_exposure_us
+            return capped_controls(
+                self._subprocess_mgr.client.controls, self._config.get("camera", "max_exposure_us")
+            )
         return None
+
+    def camera_stream(self) -> dict:  # fork: camera-controls (spec 6.1)
+        """``protocol_version`` and ``stream`` of the camera block in ``/ws``."""
+        client = self._subprocess_mgr.client if self._subprocess_mgr else None
+        has_frame = self._frame_buffer.get()[0] is not None
+        return self._stream_status.payload(client, has_frame, time.monotonic())
 
     @property
     def consecutive_failures(self) -> int:
@@ -537,6 +548,7 @@ class Engine:
                 server_errors=lambda: self.server_errors,
                 camera_controls=lambda: self.camera_controls,
                 camera_geometry=self._camera_profile.geometry_payload,  # fork: camera-controls
+                camera_stream=self.camera_stream,  # fork: camera-controls
                 sync_state=lambda: {
                     "in_progress": self.sync_in_progress,
                     "candidates": [
@@ -931,8 +943,16 @@ class Engine:
     # -- camera control (§8.4) ------------------------------------------------
 
     def set_control(self, control_id: str, value: int | float) -> None:
-        """Send a camera control change and persist to config."""
+        """Send a camera control change and persist to config.
+
+        fork: camera-controls (spec 6.1): with a camera connected the request is checked against
+        its descriptors first and ``ControlRequestError`` (HTTP 400) says what is wrong.
+        Without one (or during a recovery) nothing is advertised to check against, and
+        the value goes to the legacy keys as before.
+        """
         client = self._subprocess_mgr.client if self._subprocess_mgr else None
+        if client is not None:
+            value = validate_control_request(self.camera_controls or [], control_id, value)
         sent = client.set_control(control_id, value) if client else False
         # Persist to config: the camera profile, and in a v1 session the legacy keys too
         remember_control(self._config, client, control_id, value, sent)  # fork: camera-controls (spec 4.2)
@@ -1028,14 +1048,17 @@ class Engine:
 
     def _fork_watch_stream(self, client) -> None:
         """fork: camera-controls (spec 5.1). A v2 session tells us when the frame size changes."""
+        self._stream_status.reset()
         if client is not None and client.session_version >= 2:
             client.on_stream_info(self._fork_stream_info)
 
-    def _fork_stream_info(self, _info, new_generation: bool) -> None:
-        """A new stream generation (binning change): the centroids of the old size are meaningless.
+    def _fork_stream_info(self, info, new_generation: bool) -> None:
+        """The one STREAM_INFO handler: the engine's own work, and the stream state of ``/ws``.
 
+        A new stream generation (binning change): the centroids of the old size are meaningless.
         RA/Dec pointing stays valid, it does not depend on the pixel size.
         """
+        self._stream_status.stream_info_arrived(info, new_generation, time.monotonic())  # for /ws
         if new_generation:
             self._pointing_state.clear_centroids()
 

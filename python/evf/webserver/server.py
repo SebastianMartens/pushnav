@@ -34,6 +34,7 @@ from aiohttp import WSCloseCode, web
 
 from evf.config.manager import ConfigManager
 # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+from evf.camera.controls import ControlRequestError
 from evf.engine.camera_profile import FovRequestError, NoCameraConnected
 from evf.engine.frame_buffer import LatestFrame
 from evf.engine.goto_target import GotoTarget
@@ -92,7 +93,7 @@ class EngineActions(Protocol):
     def set_sync_selected(self, idx: int) -> None: ...
     def use_previous_calibration(self) -> None: ...
     def retry_camera(self) -> bool: ...
-    def set_control(self, name: str, value: int) -> None: ...
+    def set_control(self, name: str, value: int | float) -> None: ...  # fork: camera-controls
     def set_camera_fov(  # fork: camera-controls
         self, focal_length_mm: object = None, fov_h_deg: object = None, reset: bool = False,
     ) -> dict: ...
@@ -191,6 +192,7 @@ class WebServer:
         server_errors: Callable[[], list[dict]] | None = None,
         camera_controls: Callable[[], list[dict] | None] | None = None,
         camera_geometry: Callable[[], dict] | None = None,  # fork: camera-controls
+        camera_stream: Callable[[], dict] | None = None,  # fork: camera-controls
         sync_state: Callable[[], dict] | None = None,
         activity: Callable[[], dict] | None = None,
         stellarium_location: Callable[[], dict | None] | None = None,
@@ -210,6 +212,7 @@ class WebServer:
         self._server_errors = server_errors
         self._camera_controls = camera_controls
         self._camera_geometry = camera_geometry  # fork: camera-controls
+        self._camera_stream = camera_stream  # fork: camera-controls
         self._sync_state = sync_state
         self._activity = activity
         self._stellarium_location = stellarium_location
@@ -480,13 +483,17 @@ class WebServer:
 
     # -- API actions ----------------------------------------------------------
 
-    async def _handle_api(self, request: web.Request, fn) -> web.Response:
-        """Run a synchronous engine action and return 204."""
+    async def _handle_api(
+        self, request: web.Request, fn, bad_request: type[Exception] | None = None,  # fork: camera-controls
+    ) -> web.Response:
+        """Run a synchronous engine action and return 204 (400 for a ``bad_request`` error)."""
         if self._actions is None:
             return web.Response(status=503, text="No actions wired")
         try:
             await asyncio.to_thread(fn)
         except Exception as exc:
+            if bad_request is not None and isinstance(exc, bad_request):  # fork: camera-controls
+                return web.Response(status=400, text=str(exc))
             logger.exception("API action failed: %s", exc)
             return web.Response(status=500, text=str(exc))
         return web.Response(status=204)
@@ -555,10 +562,24 @@ class WebServer:
         return web.json_response(result)
 
     async def _api_set_control(self, request):
-        body = await request.json()
-        name = str(body["name"])
-        value = int(body["value"])
-        return await self._handle_api(request, lambda: self._actions.set_control(name, value))
+        """fork: camera-controls (spec 6.1). ``value`` is a JSON number (int or float).
+
+        The engine checks the id, enum options and range against the camera's descriptors:
+        400 for a request it cannot take, 204 otherwise.
+        """
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or not isinstance(body.get("name"), str):
+            return web.Response(status=400, text='Expected {"name": <id>, "value": <number>}')
+        value = body.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return web.Response(status=400, text='"value" must be a number')
+        name = body["name"]
+        return await self._handle_api(
+            request, lambda: self._actions.set_control(name, value), bad_request=ControlRequestError,
+        )
 
     async def _api_goto_clear(self, request):
         return await self._handle_api(request, lambda: self._actions.clear_goto_target())
@@ -679,8 +700,15 @@ class WebServer:
             "in_progress": False, "candidates": [], "selected_idx": None, "error": None,
         }
         activity_blk = self._activity() if self._activity else {}
+        # fork: camera-controls (spec 6.1): protocol_version and stream. A stream that is
+        # reconfiguring is a camera that is there, even while the frame buffer is empty.
+        session = self._camera_stream() if self._camera_stream else {}
+        stream = session.get("stream")
+        has_frame = bool(self._frame_buffer and self._frame_buffer.get()[0])
         camera_blk = {
-            "connected": True if (self._frame_buffer and self._frame_buffer.get()[0]) else False,
+            "connected": has_frame or (stream is not None and stream.get("state") == "reconfiguring"),
+            "protocol_version": session.get("protocol_version"),  # fork: camera-controls
+            "stream": stream,  # fork: camera-controls
             "all_centroids": snap.all_centroids if snap.valid else None,
             "matched_centroids": snap.matched_centroids if snap.valid else None,
             # fork: camera-controls: camera_model, backend, camera_key, sensor_width_mm, focal_length_mm
