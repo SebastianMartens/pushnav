@@ -1,7 +1,7 @@
 # SPEC_CAMERA_SERVER_WINDOWS.md — PushNav
 
 Version: 1.3 (2026-11-18: status after PRs #9, #10, #14; task 7 (v2) detailed and scheduled in `SPEC_CAMERA_CONTROLS.md` §10.8; Q2, Q5 resolved. 1.2: C server kept permanently side by side, server selection, upstream minimal-diff rules; 1.1: 25 mm reference lens, wide-field solver database)
-Status: Approved (PR #8). Tasks 1–6 mostly implemented (PRs #9, #10, #14, #15; open: 5.6, 5.9, 6.7, 6.8; 6.6 done and the `workflow_dispatch` build green; 6.2a not planned); task 7 (protocol v2): 7.0 done (S1b), 7.1 onwards open; task 8 (UVC) not planned
+Status: Approved (PR #8). Tasks 1–6 mostly implemented (PRs #9, #10, #14, #15; open: 6.7 (optional); 5.6, 5.9 and 6.8 done on 2026-11-24; 6.6 done and the `workflow_dispatch` build green; 6.2a not planned); task 7 (protocol v2): 7.0 done (S1b), 7.1 onwards open; task 8 (UVC) not planned
 Date: 2026-11-18
 Target: Windows 10/11 x64
 Issue: SebastianMartens/pushnav#1 (IDS uEye UI-306xCP-M support)
@@ -616,11 +616,11 @@ Upstream files touched by **this** spec (#1):
 |---|---|---|
 | `python/evf/camera/subprocess_mgr.py` | `_resolve_binary` / `_spawn_process` call `server_select`; one branch in `_connect_with_retry` for exit code 3; `_kill_stale_server` iterates the names `server_select` returns | selection, code-3 fallback, cleanup |
 | `python/evf/config/manager.py` | one key `"windows_server": "dotnet"` in `DEFAULT_CONFIG["camera"]` | setting |
-| `python/evf/paths.py` | none expected (`server_select` builds on the existing root detection); at most one small helper if the dev/release root isn't reachable otherwise | — |
+| `python/evf/paths.py` | one small helper `windows_camera_server_paths()` (dev and release layout of both exes) | selection |
 | `scripts/build_windows.bat` | one block "Phase 1a: build C# camera server" after the C server build, plus one `copy` line in Phase 3; a "Phase 0" block that finds MSVC via `vswhere` + `vcvars64.bat` when `cl.exe` is not on `PATH` (#13) | packaging |
 | `.github/workflows/test.yml` | one new job `camera-server-windows` appended; existing jobs untouched | CI |
 | `.github/workflows/build.yml` | one `actions/setup-dotnet` step in `build-windows` | release build |
-| `docs/hardware.md`, `CLAUDE.md`, `specs/start/SPEC_BUILD_RELEASE.md` | short added paragraphs | docs |
+| `docs/hardware.md`, `CLAUDE.md`, `README.md`, `specs/start/SPEC_BUILD_RELEASE.md` | short added paragraphs (`README.md`: "Third-party software", §3.4) | docs |
 
 Merge-risk notes: `subprocess_mgr.py` and `build_windows.bat` are the
 likeliest conflict points. Keep the hooks at the edges of functions, not
@@ -786,10 +786,10 @@ camera. **[INFRA]** = route to the infra agent.
 - [x] 5.3 Probe/open: camera list, Mono8, auto features off, buffers, image queue, capture. Test **[HW]**: `--backend ids --list` shows `UI306xCP-M`, 1936x1216, controls. *(Done and verified on the camera: `ids:1409:3060`, 1936x1216, controls `exposure` 92 to 4 000 000 us, `gain` 0 to 100, `fps` 1 to 19.6. Binning is not offered until task 7.2.)*
 - [x] 5.4 Capture loop + JPEG frames over TCP (v1). Test **[HW]**: conformance suite against the real camera; app shows live image. *(Done: conformance suite 24 passed + 1 skipped (fake-only) against the real camera with `PUSHNAV_CONFORMANCE_BACKEND=ids`; the engine received live frames, 1936x1216 at 10 fps.)*
 - [x] 5.5 v1 controls (`exposure` in `"100us"`, `gain` raw 0–100). Test **[HW]**: sliders change brightness; CONTROL_INFO reflects applied values. *(Note: the v1 view caps `exposure` at 1.5 s = 15000 units, `V1ControlAdapter.MaxExposureMicroseconds`, and clamps SET_CONTROL to it, because the engine's fixed 2.0 s stall timeout would otherwise restart the server; protocol v2 lifts it, see Q13. Already implemented and tested in the adapter.)* *(Done: brightness follows exposure and gain on the real camera; the "sliders" were driven through the engine's `/api/control`.)*
-- [ ] 5.6 Device removal -> exit(1); engine recovers when re-plugged. Test **[HW]**: unplug/replug during streaming. *(Implemented: removal events plus the capture loop's error and timeout handling, all covered by xUnit with the fake API. Still open: the real unplug/replug, which needs a person at the camera.)*
+- [x] 5.6 Device removal -> exit(1); engine recovers when re-plugged. Test **[HW]**: unplug/replug during streaming. *(Implemented: removal events plus the capture loop's error and timeout handling, all covered by xUnit with the fake API. Still open: the real unplug/replug, which needs a person at the camera.)* *(Done: manual hardware test by Sebastian, 2026-11-24: unplug/replug during streaming, the engine recovered.)*
 - [x] 5.7 Exit code 3 when no supported camera is present. Exit 3 immediately when only an allowlisted UVC camera is seen and UVC is disabled (§8.3; needs the MF enumeration from task 6.2a). Test: xUnit (fake device lists) + manual without camera. *(Done for "no camera": xUnit with an empty camera list and with no API at all. The "immediate exit for a UVC camera" half stays with 6.2a. The manual run without the camera is part of the 5.6 steps for Sebastian, since the camera cannot be unplugged remotely.)*
 - [x] 5.8 Kill/respawn without `is_ExitCamera` (Q7). Test **[HW]**: `taskkill /F` then restart, camera opens. *(Done: see Q7.)*
-- [ ] 5.9 Night test: plate solve with the IDS camera (25 mm lens), at least one target tracked. Needs the wide solver database and per-profile FOV from `SPEC_CAMERA_CONTROLS.md` slice S1 (§10.8). Test **[HW]** + sky.
+- [x] 5.9 Night test: plate solve with the IDS camera (25 mm lens), at least one target tracked. Needs the wide solver database and per-profile FOV from `SPEC_CAMERA_CONTROLS.md` slice S1 (§10.8). Test **[HW]** + sky. *(Done: manual night test by Sebastian, 2026-11-24: plate solve with the IDS camera and the 25 mm lens, at least one target tracked. The measurements of `SPEC_CAMERA_CONTROLS.md` task 6.3 (solve rate and time, Q6 to Q8, wide-field sample frames) are not part of this and stay open there.)*
 
 ### 6. Engine, build, packaging
 - [x] 6.1 New `evf/camera/server_select.py`: `camera.windows_server` (`"dotnet"` default, or `"c"`), `PUSHNAV_CAMERA_SERVER` override, warning on invalid values, missing-exe fallback in both directions, ignored on macOS/Linux. Plus one config default line in `config/manager.py`. Test: new `tests/test_server_select.py` (dev/release layouts, both settings, env override, each exe missing, neither present, non-Windows). *(Done. The dev layout is `camera/windows-dotnet/publish/camera_server_dotnet.exe` (the `build.bat` output) and `camera/windows/camera_server.exe`; the release layout has both next to the app exe. The layout comes from one small helper, `evf.paths.windows_camera_server_paths()` (marked `# fork:`; §8.5 allows "at most one small helper" in `paths.py`). Dev only: `PUSHNAV_CAMERA_SERVER_ARGS` passes extra arguments to the C# server, e.g. `--backend fake --fake-images tests/samples` (task 3.3).)*
@@ -806,7 +806,7 @@ camera. **[INFRA]** = route to the infra agent.
 - [x] 6.5 **[INFRA]** Add job `camera-server-windows` to `.github/workflows/test.yml` (xUnit, AOT publish, conformance against the exe, artifact; §10.3). Test: job green on the PR; existing `python`/`web` jobs unchanged.
 - [x] 6.6 **[INFRA]** `build.yml`: add setup-dotnet to `build-windows` and a check that `camera_server_dotnet.exe` is in the release dir. Test: `workflow_dispatch` with platform=windows produces the installer with both exes. *(Done in YAML; the `workflow_dispatch` build is green: run 45158886304, all four platforms.)*
 - [ ] 6.7 *(Optional, later; Q12)* Settings UI select "Camera server: C# (default) / C" that writes `camera.windows_server` and triggers "Retry camera". Test: vitest + manual.
-- [ ] 6.8 Upstream-merge check before the PR: `git diff upstream/main -- camera/windows/` is empty, and every edited upstream file is in the §8.5 table.
+- [x] 6.8 Upstream-merge check before the PR: `git diff upstream/main -- camera/windows/` is empty, and every edited upstream file is in the §8.5 table. *(Done 2026-11-24 against upstream/main 4f563af and origin/main a240755: `git diff upstream/main origin/main -- camera/windows/` is empty. Of the #1 files, `subprocess_mgr.py`, `config/manager.py`, `paths.py`, `build_windows.bat`, `build.yml`, `docs/hardware.md`, `CLAUDE.md` and `SPEC_BUILD_RELEASE.md` are edited upstream files and in the table; `server_select.py` and the tests are new files. Two gaps were fixed in the table: `README.md` ("Third-party software" section, task 6.4) was missing, and the `paths.py` row now names the helper `windows_camera_server_paths()` (task 6.1). `test.yml` is not an upstream file: the fork added it in 699ba8c, before #1. The other upstream files that differ belong to #3 (listed in `SPEC_CAMERA_CONTROLS.md` §1.2) or to fork work outside these specs.)*
 
 ### 7. Protocol v2 in the server (#3 approved in PR #8)
 
