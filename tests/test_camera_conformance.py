@@ -471,8 +471,9 @@ class TestV2Vectors:
     def test_4_binning_reconfigures_the_stream_before_the_new_size_arrives(self, v2_server):
         with v2_server.connect() as sock:
             _, controls, info, _ = _handshake_v2(sock)
-            if "binning" not in _controls_by_id(controls):
-                pytest.skip("binning is not advertised (the IDS backend gets it in slice S6)")  # 11.4: only what the camera has
+            if v2_server.kind == "exe" and _exe_backend() == "ids" and "binning" not in _controls_by_id(controls):
+                # 11.4: a backend advertises only what its camera has; the IDS backend gets binning in slice S6
+                pytest.skip("the IDS backend does not advertise binning yet")
             assert _controls_by_id(controls)["binning"]["restarts_stream"] is True
             sock.sendall(encode_json_message(MSG_SET_CONTROL, {"id": "binning", "value": 2}))
             reconfiguring, frames_before = _next_stream_info(sock, "reconfiguring")
