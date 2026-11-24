@@ -46,6 +46,10 @@ def _v1_exposure(unit="100us"):
             "min": 1, "max": 15000, "step": 1, "cur": 1}
 
 
+def _first_run(info):
+    return controls.ControlDescriptor.from_info(info).first_run_value()
+
+
 class FakeClient:
     """What ``restore_controls`` and ``remember_control`` need from a CameraClient."""
 
@@ -192,35 +196,35 @@ class TestUnitFilter:
 
 class TestFirstRun:
     def test_linear_midpoint_of_an_int_control(self):
-        assert controls.first_run_value(_gain()) == 50
-        assert controls.first_run_value(_gain(min=1, max=4)) == 2  # floor, as the engine always did
+        assert _first_run(_gain()) == 50
+        assert _first_run(_gain(min=1, max=4)) == 2  # floor, as the engine always did
 
     def test_linear_midpoint_of_a_float_control(self):
-        assert controls.first_run_value(_fps()) == 5.5
+        assert _first_run(_fps()) == 5.5
 
     def test_geometric_mean_of_a_log_control(self):
-        assert controls.first_run_value(_exposure_v2(scale="log", min=100, max=10_000)) == 1000
-        value = controls.first_run_value(_fps(scale="log", min=1.0, max=100.0))
+        assert _first_run(_exposure_v2(scale="log", min=100, max=10_000)) == 1000
+        value = _first_run(_fps(scale="log", min=1.0, max=100.0))
         assert value == pytest.approx(10.0) and isinstance(value, float)
 
     def test_a_log_control_with_a_non_positive_bound_falls_back_to_linear(self):
-        assert controls.first_run_value(_gain(scale="log", min=0, max=100)) == 50
+        assert _first_run(_gain(scale="log", min=0, max=100)) == 50
 
     def test_first_option_of_an_enum(self):
-        assert controls.first_run_value(_binning()) == 1
-        assert controls.first_run_value(_binning(options=[{"value": 4, "label": "4"}, {"value": 2}])) == 4
-        assert controls.first_run_value(_binning(options=[])) is None
+        assert _first_run(_binning()) == 1
+        assert _first_run(_binning(options=[{"value": 4, "label": "4"}, {"value": 2}])) == 4
+        assert _first_run(_binning(options=[])) is None
 
     def test_the_descriptors_default_wins_over_the_midpoint(self):
-        assert controls.first_run_value(_exposure_v2(default=250_000, scale="log")) == 250_000
-        assert controls.first_run_value(_binning(default=2)) == 2
+        assert _first_run(_exposure_v2(default=250_000, scale="log")) == 250_000
+        assert _first_run(_binning(default=2)) == 2
 
     def test_a_default_that_is_not_valid_is_ignored(self):
-        assert controls.first_run_value(_binning(default=3)) == 1
-        assert controls.first_run_value(_gain(default="high")) == 50
+        assert _first_run(_binning(default=3)) == 1
+        assert _first_run(_gain(default="high")) == 50
 
     def test_a_descriptor_without_a_usable_range_gets_nothing(self):
-        assert controls.first_run_value({"id": "x", "type": "int", "min": None, "max": 5}) is None
+        assert _first_run({"id": "x", "type": "int", "min": None, "max": 5}) is None
 
     def test_first_run_values_are_sent_and_saved_in_the_profile(self, config):
         client = FakeClient(_all_v2())
@@ -262,20 +266,53 @@ class TestLegacyMigration:
         controls.restore_controls(client, config)
         assert client.sent == [("exposure", 100_000)]
 
-    def test_the_profile_value_wins_over_the_legacy_one(self, config):
+    def test_in_a_v1_session_the_legacy_value_wins_over_the_profile(self, config):
         config.exposure = 1
+        profiles.save_control(config, KEY, "exposure", 900, "100us")
+        client = FakeClient([_v1_exposure()], version=1)
+        controls.restore_controls(client, config)
+        assert client.sent == [("exposure", 1)]
+        assert profiles.get_saved_control(config, KEY, "exposure") == {"value": 1, "unit": "100us"}  # kept in step
+
+    def test_the_profile_value_is_used_when_there_is_no_legacy_value(self, config):
         profiles.save_control(config, KEY, "exposure", 900, "100us")
         client = FakeClient([_v1_exposure()], version=1)
         controls.restore_controls(client, config)
         assert client.sent == [("exposure", 900)]
 
-    def test_a_dropped_profile_value_falls_back_to_the_legacy_one_in_a_v1_session(self, config):
+    def test_a_profile_value_in_another_unit_stays_while_the_legacy_value_is_used(self, config):
         config.exposure = 700
         profiles.save_control(config, KEY, "exposure", 250_000, "us")  # saved in a v2 session
         client = FakeClient([_v1_exposure()], version=1)
         controls.restore_controls(client, config)
         assert client.sent == [("exposure", 700)]
         assert profiles.get_saved_control(config, KEY, "exposure") == {"value": 250_000, "unit": "us"}
+
+    def test_a_control_changed_while_the_camera_is_away_is_what_the_next_restore_sends(self, config):
+        """The repro of the review: set while connected, set during a recovery (no client), then restore."""
+        client = FakeClient([_v1_exposure(), _gain()], version=1)
+        controls.restore_controls(client, config)  # first run: midpoints
+        controls.remember_control(config, client, "exposure", 300, True)  # the user sets 300 while connected
+        controls.remember_control(config, None, "exposure", 900, False)  # and 900 while the camera is away
+        assert config.exposure == 900
+        again = FakeClient([_v1_exposure(), _gain()], version=1)
+        controls.restore_controls(again, config)
+        assert dict(again.sent)["exposure"] == 900
+        assert profiles.get_saved_control(config, KEY, "exposure") == {"value": 900, "unit": "100us"}
+
+    def test_a_change_whose_send_failed_is_what_the_next_restore_sends(self, config):
+        client = FakeClient([_v1_exposure()], version=1, accept=False)
+        controls.remember_control(config, client, "exposure", 800, False)
+        again = FakeClient([_v1_exposure()], version=1)
+        controls.restore_controls(again, config)
+        assert again.sent == [("exposure", 800)]
+
+    def test_a_v2_session_has_no_legacy_authority(self, config):
+        config.exposure = 5
+        profiles.save_control(config, KEY, "exposure", 200_000, "us")
+        client = FakeClient([_exposure_v2()], version=2)
+        controls.restore_controls(client, config)
+        assert client.sent == [("exposure", 200_000)]
 
     def test_a_v1_first_run_stores_the_midpoint_in_the_legacy_keys_as_before(self, config):
         client = FakeClient([_v1_exposure(), _gain()], version=1)
@@ -295,9 +332,9 @@ class TestLegacyMigration:
 class TestRememberControl:
     def test_a_v2_session_saves_the_value_with_its_unit_in_the_profile_only(self, config):
         client = FakeClient(_all_v2())
-        controls.remember_control(config, client, "exposure", 300_000)
-        controls.remember_control(config, client, "fps", 3.5)
-        controls.remember_control(config, client, "binning", 2)
+        controls.remember_control(config, client, "exposure", 300_000, True)
+        controls.remember_control(config, client, "fps", 3.5, True)
+        controls.remember_control(config, client, "binning", 2, True)
         assert profiles.get_saved_control(config, KEY, "exposure") == {"value": 300_000, "unit": "us"}
         assert profiles.get_saved_control(config, KEY, "fps") == {"value": 3.5, "unit": "fps"}
         assert profiles.get_saved_control(config, KEY, "binning") == {"value": 2}
@@ -305,38 +342,43 @@ class TestRememberControl:
 
     def test_a_v1_session_also_writes_the_legacy_keys(self, config):
         client = FakeClient([_v1_exposure(), _gain()], version=1)
-        controls.remember_control(config, client, "exposure", 333)
-        controls.remember_control(config, client, "gain", 44)
+        controls.remember_control(config, client, "exposure", 333, True)
+        controls.remember_control(config, client, "gain", 44, True)
         assert (config.exposure, config.gain) == (333, 44)
         assert profiles.get_saved_control(config, KEY, "exposure") == {"value": 333, "unit": "100us"}
 
     def test_without_a_camera_the_legacy_keys_are_written_as_before(self, config):
-        controls.remember_control(config, None, "gain", 9)
-        controls.remember_control(config, None, "exposure", 8)
+        controls.remember_control(config, None, "gain", 9, True)
+        controls.remember_control(config, None, "exposure", 8, True)
         assert (config.gain, config.exposure) == (9, 8)
         assert config.get("camera", "profiles") == {}
 
+    def test_a_v2_session_that_could_not_send_saves_nothing(self, config):
+        controls.remember_control(config, FakeClient([_gain()]), "gain", 5, False)
+        assert profiles.get_saved_control(config, KEY, "gain") is None
+        assert config.gain is None
+
     def test_a_value_that_was_not_sent_is_not_saved_in_the_profile(self, config):
-        controls.remember_control(config, FakeClient([_gain()], version=1), "gain", 5, sent=False)
+        controls.remember_control(config, FakeClient([_gain()], version=1), "gain", 5, False)
         assert profiles.get_saved_control(config, KEY, "gain") is None
         assert config.gain == 5  # the legacy key keeps today's behaviour
 
     def test_an_id_the_camera_does_not_advertise_is_not_saved_in_the_profile(self, config):
-        controls.remember_control(config, FakeClient([_gain()]), "fps", 2.0)
+        controls.remember_control(config, FakeClient([_gain()]), "fps", 2.0, True)
         assert profiles.get_saved_control(config, KEY, "fps") is None
 
     def test_the_file_is_written_only_when_the_entry_changes(self, config, monkeypatch):
         client = FakeClient([_gain()])
-        controls.remember_control(config, client, "gain", 5)
+        controls.remember_control(config, client, "gain", 5, True)
         saves = []
         monkeypatch.setattr(config, "save", lambda: saves.append(1))
-        controls.remember_control(config, client, "gain", 5)
+        controls.remember_control(config, client, "gain", 5, True)
         assert saves == []
-        controls.remember_control(config, client, "gain", 6)
+        controls.remember_control(config, client, "gain", 6, True)
         assert len(saves) == 1
 
     def test_a_saved_value_is_what_the_next_restore_sends(self, config):
-        controls.remember_control(config, FakeClient(_all_v2()), "exposure", 123_456)
+        controls.remember_control(config, FakeClient(_all_v2()), "exposure", 123_456, True)
         client = FakeClient(_all_v2())
         controls.restore_controls(client, config)
         assert ("exposure", 123_456) in client.sent
@@ -506,3 +548,140 @@ class TestRecoveryRestores:
             server.stop()
             if server2 is not None:
                 server2.stop()
+
+
+# -- the descriptor ----------------------------------------------------------------------------
+
+
+class TestControlDescriptor:
+    def test_built_from_a_control_info_entry(self):
+        d = controls.ControlDescriptor.from_info(_exposure_v2(scale="log", default=5))
+        assert (d.id, d.type, d.unit, d.min, d.max, d.default, d.scale) == (
+            "exposure", "int", "us", 100, 4_000_000, 5, "log")
+
+    def test_an_enum_keeps_the_values_of_its_options(self):
+        d = controls.ControlDescriptor.from_info(_binning())
+        assert d.options == (1, 2)
+
+    @pytest.mark.parametrize("info", [None, "x", {}, {"id": ""}, {"id": 5}, []])
+    def test_an_entry_without_an_id_is_not_a_descriptor(self, info):
+        assert controls.ControlDescriptor.from_info(info) is None
+
+    def test_a_missing_type_is_int_as_before(self):
+        d = controls.ControlDescriptor.from_info({"id": "gain", "min": 0, "max": 9})
+        assert d.type == "int" and d.first_run_value() == 4
+
+    def test_it_is_frozen(self):
+        d = controls.ControlDescriptor.from_info(_gain())
+        with pytest.raises(Exception):
+            d.id = "x"
+
+    def test_coerce(self):
+        gain, fps, binning = (controls.ControlDescriptor.from_info(x) for x in (_gain(), _fps(), _binning()))
+        assert gain.coerce(2.6) == 3 and isinstance(gain.coerce(2.0), int)
+        assert fps.coerce(2) == 2.0 and isinstance(fps.coerce(2), float)
+        assert binning.coerce(2.0) == 2 and binning.coerce(3) is None
+        assert gain.coerce("2") is None and gain.coerce(True) is None and gain.coerce(float("nan")) is None
+
+    def test_the_value_source_is_named(self, config):
+        chosen = controls.choose_value(config, KEY, controls.ControlDescriptor.from_info(_gain()), 2)
+        assert chosen == controls.ChosenValue(50, controls.ValueSource.MIDPOINT)
+        chosen = controls.choose_value(config, KEY, controls.ControlDescriptor.from_info(_gain(default=7)), 2)
+        assert chosen.source is controls.ValueSource.DEFAULT
+
+
+# -- concurrent writers of camera.profiles ---------------------------------------------------------
+
+
+def _widen_the_race_window(cfg):
+    """Make ``config.set`` slow: a writer that read the profiles before another one wrote them
+    then stores its stale copy a moment later, which is what a lost update needs."""
+    original = cfg.set
+
+    def slow_set(section, key, value):
+        time.sleep(0.0005)
+        original(section, key, value)
+
+    cfg.set = slow_set
+
+
+class TestProfilesAreWrittenUnderOneLock:
+    def test_saving_controls_cannot_wipe_a_learned_fov(self, tmp_path):
+        """The solver thread stores a learned FOV while the web server saves controls."""
+        import threading
+
+        cfg = ConfigManager(config_dir=tmp_path)
+        profiles.ensure_profile(cfg, KEY)
+        errors: list[BaseException] = []
+        _widen_the_race_window(cfg)
+
+        def guard(fn):
+            def run():
+                try:
+                    fn()
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+            return run
+
+        def save_controls():
+            for i in range(150):
+                profiles.save_control(cfg, KEY, "gain", i, "raw")
+                profiles.save_control(cfg, KEY, f"extra{i % 5}", i, "raw")
+
+        def learn_fovs():
+            for i in range(150):
+                profiles.set_fov(cfg, KEY, 20.0 + i / 100, "learned")
+
+        threads = [threading.Thread(target=guard(save_controls)) for _ in range(2)]
+        threads += [threading.Thread(target=guard(learn_fovs)) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        assert not errors
+        fov, source = profiles.get_fov(cfg, KEY)
+        assert (fov, source) == (20.0 + 149 / 100, "learned"), "a control save wiped the FOV"
+        assert profiles.get_saved_control(cfg, KEY, "gain") == {"value": 149, "unit": "raw"}
+        for n in range(5):
+            assert profiles.get_saved_control(cfg, KEY, f"extra{n}") is not None
+
+    def test_a_slow_control_save_does_not_undo_a_fov_stored_meanwhile(self, tmp_path):
+        import threading
+
+        cfg = ConfigManager(config_dir=tmp_path)
+        profiles.ensure_profile(cfg, KEY)
+        original, first = cfg.set, threading.Event()
+
+        def slow_first_set(section, key, value):
+            if not first.is_set():
+                first.set()
+                time.sleep(0.4)  # the control save has read the profile and is about to write it back
+            original(section, key, value)
+
+        cfg.set = slow_first_set
+        saver = threading.Thread(target=profiles.save_control, args=(cfg, KEY, "gain", 5, "raw"))
+        saver.start()
+        assert first.wait(5.0)
+        profiles.set_fov(cfg, KEY, 25.6, "learned")  # the solver thread, in the middle of that save
+        saver.join(timeout=10)
+        assert profiles.get_fov(cfg, KEY) == (25.6, "learned")
+        assert profiles.get_saved_control(cfg, KEY, "gain") == {"value": 5, "unit": "raw"}
+
+    def test_two_cameras_saving_at_once_keep_both_profiles(self, tmp_path):
+        import threading
+
+        cfg = ConfigManager(config_dir=tmp_path)
+        keys = [f"cam:{n}" for n in range(6)]
+        _widen_the_race_window(cfg)
+
+        def work(key):
+            for i in range(60):
+                profiles.save_control(cfg, key, "gain", i, "raw")
+
+        threads = [threading.Thread(target=work, args=(k,)) for k in keys]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        for key in keys:
+            assert profiles.get_saved_control(cfg, key, "gain") == {"value": 59, "unit": "raw"}
