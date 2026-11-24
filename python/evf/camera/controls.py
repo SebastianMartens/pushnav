@@ -119,12 +119,11 @@ class ControlDescriptor:
             return float(value)
         return int(round(value))
 
-    def in_range(self, value: Any) -> bool:
-        """True if ``value`` lies in ``[min, max]`` (an enum has no range: its options are the check)."""
+    def clamp(self, value: Any) -> Any:
+        """``value`` limited to ``[min, max]`` (an enum has no range: its options are the check)."""
         if self.type == "enum" or not (_is_number(self.min) and _is_number(self.max)):
-            return True
-        slack = 1e-9 * max(1.0, abs(self.min), abs(self.max))  # float noise from a slider
-        return self.min - slack <= value <= self.max + slack
+            return value
+        return min(max(value, self.min), self.max)
 
     def default_value(self) -> Any | None:
         """The descriptor's own ``default`` if it is a valid value, else None."""
@@ -152,9 +151,12 @@ def validate_control_request(infos: list, control_id: object, value: object) -> 
     """The value to send for a UI request, or ``ControlRequestError`` (spec 6.1).
 
     ``infos`` are the descriptors the UI currently sees. An id the camera does not advertise,
-    a value that is not a number, an enum value that is not one of its options and a number
-    outside ``[min, max]`` are rejected. A valid value comes back as the control's own
-    type: ``int`` rounds, ``float`` converts, an enum gives the option's value.
+    a value that is not a number and an enum value that is not one of its options are rejected.
+    A number outside ``[min, max]`` is clamped, as the camera would: the ranges are coupled (fps
+    moves the exposure maximum), so a slider can commit against a range that has just moved, and
+    ``infos`` hold the ``camera.max_exposure_us`` cap, which this keeps enforced. A valid value
+    comes back as the control's own type: ``int`` rounds, ``float`` converts, an enum gives the
+    option's value.
     """
     descriptor = next((d for d in _descriptors(infos) if d.id == control_id), None)
     if descriptor is None:
@@ -164,9 +166,7 @@ def validate_control_request(infos: list, control_id: object, value: object) -> 
         if descriptor.type == "enum":
             raise ControlRequestError(f"{descriptor.id}: {value!r} is not one of {list(descriptor.options)}")
         raise ControlRequestError(f"{descriptor.id}: {value!r} is not a number")
-    if not descriptor.in_range(coerced):
-        raise ControlRequestError(f"{descriptor.id}: {coerced} is outside {descriptor.min} to {descriptor.max}")
-    return coerced
+    return descriptor.clamp(coerced)
 
 
 def capped_controls(infos: list[dict], max_exposure_us: object) -> list[dict]:
@@ -178,14 +178,17 @@ def capped_controls(infos: list[dict], max_exposure_us: object) -> list[dict]:
     """
     if not _is_number(max_exposure_us) or max_exposure_us <= 0:
         return infos
-    capped = []
-    for info in infos:
-        if (isinstance(info, dict) and info.get("id") == "exposure" and info.get("unit") == "us"
-                and _is_number(info.get("max")) and info["max"] > max_exposure_us
-                and (not _is_number(info.get("min")) or info["min"] <= max_exposure_us)):
-            info = {**info, "max": max_exposure_us}
-        capped.append(info)
-    return capped
+    return [
+        {**info, "max": max_exposure_us} if _exposure_above_cap(info, max_exposure_us) else info
+        for info in infos
+    ]
+
+
+def _exposure_above_cap(info: object, cap: float) -> bool:
+    """True for a v2 exposure descriptor whose ``max`` is above ``cap`` (and whose ``min`` is not)."""
+    return (isinstance(info, dict) and info.get("id") == "exposure" and info.get("unit") == "us"
+            and _is_number(info.get("max")) and info["max"] > cap
+            and (not _is_number(info.get("min")) or info["min"] <= cap))
 
 
 def restore_controls(client, config: ConfigManager) -> list[tuple[str, Any]]:

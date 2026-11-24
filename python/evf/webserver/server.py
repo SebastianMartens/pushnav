@@ -71,6 +71,8 @@ _NO_CAMERA_INFO = {
     "camera_model": None, "backend": None, "camera_key": None,
     "sensor_width_mm": None, "focal_length_mm": None,
 }
+# fork: camera-controls: protocol_version and stream of the camera block while there is no provider
+_NO_STREAM = {"protocol_version": None, "stream": None}
 
 
 def _default_geometry() -> dict:
@@ -93,7 +95,7 @@ class EngineActions(Protocol):
     def set_sync_selected(self, idx: int) -> None: ...
     def use_previous_calibration(self) -> None: ...
     def retry_camera(self) -> bool: ...
-    def set_control(self, name: str, value: int | float) -> None: ...  # fork: camera-controls
+    def set_control(self, name: str, value: int) -> None: ...
     def set_camera_fov(  # fork: camera-controls
         self, focal_length_mm: object = None, fov_h_deg: object = None, reset: bool = False,
     ) -> dict: ...
@@ -307,7 +309,7 @@ class WebServer:
         app.router.add_post("/api/calibration/use-previous", self._api_use_previous_calibration)
         app.router.add_post("/api/camera/retry", self._api_camera_retry)
         app.router.add_post("/api/camera/fov", self._api_camera_fov)  # fork: camera-controls
-        app.router.add_post("/api/control", self._api_set_control)
+        app.router.add_post("/api/control", self._api_camera_control)  # fork: camera-controls (was _api_set_control)
         app.router.add_post("/api/goto/clear", self._api_goto_clear)
         app.router.add_post("/api/goto/set", self._api_goto_set)
         app.router.add_post("/api/settings", self._api_settings)
@@ -483,17 +485,13 @@ class WebServer:
 
     # -- API actions ----------------------------------------------------------
 
-    async def _handle_api(
-        self, request: web.Request, fn, bad_request: type[Exception] | None = None,  # fork: camera-controls
-    ) -> web.Response:
-        """Run a synchronous engine action and return 204 (400 for a ``bad_request`` error)."""
+    async def _handle_api(self, request: web.Request, fn) -> web.Response:
+        """Run a synchronous engine action and return 204."""
         if self._actions is None:
             return web.Response(status=503, text="No actions wired")
         try:
             await asyncio.to_thread(fn)
         except Exception as exc:
-            if bad_request is not None and isinstance(exc, bad_request):  # fork: camera-controls
-                return web.Response(status=400, text=str(exc))
             logger.exception("API action failed: %s", exc)
             return web.Response(status=500, text=str(exc))
         return web.Response(status=204)
@@ -561,12 +559,14 @@ class WebServer:
             return web.Response(status=500, text=str(exc))
         return web.json_response(result)
 
-    async def _api_set_control(self, request):
-        """fork: camera-controls (spec 6.1). ``value`` is a JSON number (int or float).
+    async def _api_camera_control(self, request: web.Request) -> web.Response:
+        """fork: camera-controls (spec 6.1). Set a control; ``value`` is a JSON number (int or float).
 
-        The engine checks the id, enum options and range against the camera's descriptors:
-        400 for a request it cannot take, 204 otherwise.
+        The engine checks the id and the enum options against the camera's descriptors and
+        clamps a number to the range: 400 for a request it cannot take, 204 otherwise.
         """
+        if self._actions is None:
+            return web.Response(status=503, text="No actions wired")
         try:
             body = await request.json()
         except ValueError:
@@ -576,10 +576,20 @@ class WebServer:
         value = body.get("value")
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             return web.Response(status=400, text='"value" must be a number')
-        name = body["name"]
-        return await self._handle_api(
-            request, lambda: self._actions.set_control(name, value), bad_request=ControlRequestError,
-        )
+        try:
+            await asyncio.to_thread(lambda: self._actions.set_control(body["name"], value))
+        except ControlRequestError as exc:
+            return web.Response(status=400, text=str(exc))
+        except Exception as exc:
+            logger.exception("set_control failed: %s", exc)
+            return web.Response(status=500, text=str(exc))
+        return web.Response(status=204)
+
+    async def _api_set_control(self, request):
+        body = await request.json()
+        name = str(body["name"])
+        value = int(body["value"])
+        return await self._handle_api(request, lambda: self._actions.set_control(name, value))
 
     async def _api_goto_clear(self, request):
         return await self._handle_api(request, lambda: self._actions.clear_goto_target())
@@ -700,15 +710,10 @@ class WebServer:
             "in_progress": False, "candidates": [], "selected_idx": None, "error": None,
         }
         activity_blk = self._activity() if self._activity else {}
-        # fork: camera-controls (spec 6.1): protocol_version and stream. A stream that is
-        # reconfiguring is a camera that is there, even while the frame buffer is empty.
-        session = self._camera_stream() if self._camera_stream else {}
-        stream = session.get("stream")
-        has_frame = bool(self._frame_buffer and self._frame_buffer.get()[0])
+        session = self._camera_stream() if self._camera_stream else _NO_STREAM  # fork: camera-controls
         camera_blk = {
-            "connected": has_frame or (stream is not None and stream.get("state") == "reconfiguring"),
-            "protocol_version": session.get("protocol_version"),  # fork: camera-controls
-            "stream": stream,  # fork: camera-controls
+            "connected": True if (self._frame_buffer and self._frame_buffer.get()[0]) else False,
+            **session,  # fork: camera-controls (spec 6.1): protocol_version, stream; connected, true while reconfiguring
             "all_centroids": snap.all_centroids if snap.valid else None,
             "matched_centroids": snap.matched_centroids if snap.valid else None,
             # fork: camera-controls: camera_model, backend, camera_key, sensor_width_mm, focal_length_mm

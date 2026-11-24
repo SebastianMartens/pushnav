@@ -36,30 +36,17 @@ export interface NavData {
   edge_angle_deg: number | null;
 }
 
-export interface ControlOption {
-  value: number;
-  label: string;
-}
-
 export interface ControlDescriptor {
   id?: string;     // server uses "id"
   name?: string;   // some payloads use "name"
   label: string;
-  // An enum control has `options` and no min / max / step.
-  min?: number;
-  max?: number;
-  step?: number;
+  min: number;
+  max: number;
+  step: number;
   cur: number;     // current value — DPG protocol uses "cur"
   value?: number;  // legacy alias kept for back-compat
   unit?: string;
-  type?: "int" | "float" | "enum" | string;
-  // fork: camera-controls (protocol v2, spec 6.2)
-  options?: ControlOption[];
-  /** "log": the slider runs on log10(value). Default "linear". */
-  scale?: "linear" | "log";
-  /** Changing it restarts the stream (binning): the frame size changes. */
-  restarts_stream?: boolean;
-  default?: number;
+  type?: string;
 }
 
 export interface SyncCandidate {
@@ -108,20 +95,10 @@ export interface CameraBlock {
   sensor_width_mm?: number | null;
   /** Focal length behind the current FOV (user or learned), when the sensor size is known. */
   focal_length_mm?: number | null;
-  // fork: camera-controls (spec 6.1). Absent from engines that predate them.
-  /** Protocol version of the camera session (1 or 2); null with no camera. */
+  // fork: camera-controls (spec 6.1). Protocol version of the session (1, 2; null: no camera) and,
+  // in a v2 session, the frames now arriving; null in a v1 session. Absent from older engines.
   protocol_version?: number | null;
-  /** The frames now arriving (protocol v2 STREAM_INFO); null in a v1 session or with no camera. */
-  stream?: CameraStream | null;
-}
-
-/** `camera.stream` of the /ws state (protocol v2). "reconfiguring" while the camera restarts its stream. */
-export interface CameraStream {
-  width: number;
-  height: number;
-  binning: number;
-  state: "streaming" | "reconfiguring" | string;
-  frame_interval_us: number | null;
+  stream?: import("./cameraControlTypes").CameraStream | null;
 }
 
 /** How the FOV was set; "searching" while the FOV search runs (spec 5.4.4), "default" = legacy 8.86°. */

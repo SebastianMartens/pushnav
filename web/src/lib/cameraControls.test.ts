@@ -8,14 +8,16 @@ import {
   snapToStep,
   sortControls,
   toSliderPosition,
-} from "./controlFormat";
-import type { ControlDescriptor } from "./types";
+  valueAtPosition,
+  serverValueOf,
+} from "./cameraControls";
+import type { ControlDescriptorV2 } from "./cameraControlTypes";
 
-const exposure: ControlDescriptor = {
+const exposure: ControlDescriptorV2 = {
   id: "exposure", label: "Exposure", type: "int", unit: "us",
   min: 92, max: 4_000_000, step: 78, cur: 200_000, scale: "log",
 };
-const fps: ControlDescriptor = {
+const fps: ControlDescriptorV2 = {
   id: "fps", label: "Frame rate", type: "float", unit: "fps", min: 0.25, max: 10, step: 0.01, cur: 4,
 };
 
@@ -50,18 +52,6 @@ describe("formatControlValue", () => {
     expect(formatControlValue(25, "fps")).toBe("25.00 fps (40.0 ms)");
   });
 
-  // The units of the v1 servers keep their labels.
-  it.each([
-    [15000, "100us", "1.50 s"],
-    [2500, "100us", "250 ms"],
-    [100, "100us", "10.0 ms"],
-    [0, "log2s", "1.00 s"],
-    [-3, "log2s", "125 ms"],
-    [-6, "log2s", "15.6 ms"],
-  ])("v1 %d in %s -> %s", (value, unit, label) => {
-    expect(formatControlValue(value, unit)).toBe(label);
-  });
-
   it("shows gain and unit-less values as the plain number", () => {
     expect(formatControlValue(40, "raw")).toBe("40");
     expect(formatControlValue(40)).toBe("40");
@@ -75,7 +65,7 @@ describe("formatControlValue", () => {
 });
 
 describe("sortControls", () => {
-  const ctl = (id: string, label: string): ControlDescriptor => ({ id, label, cur: 0 });
+  const ctl = (id: string, label: string): ControlDescriptorV2 => ({ id, label, cur: 0 });
 
   it("puts exposure, fps, gain, binning first and the others by label", () => {
     const sorted = sortControls([
@@ -85,7 +75,7 @@ describe("sortControls", () => {
     expect(sorted.map((c) => c.id)).toEqual(["exposure", "fps", "gain", "binning", "contrast", "gamma"]);
   });
 
-  it("keeps the v1 order of exposure and gain, and does not modify its input", () => {
+  it("keeps exposure before gain, and does not modify its input", () => {
     const v1 = [ctl("exposure", "Exposure"), ctl("gain", "Gain")];
     expect(sortControls(v1).map((c) => c.id)).toEqual(["exposure", "gain"]);
     const mixed = [ctl("gain", "Gain"), ctl("exposure", "Exposure")];
@@ -134,5 +124,36 @@ describe("snapToStep", () => {
     expect(Number.isInteger(snapToStep(exposure, 1234.5))).toBe(true);
     expect(snapToStep(fps, 3.456789)).toBe(3.46);
     expect(snapToStep(fps, 0.1)).toBe(0.25);
+  });
+});
+
+describe("valueAtPosition", () => {
+  const linear: ControlDescriptorV2 = { id: "gain", label: "Gain", type: "int", min: 0, max: 100, step: 1, cur: 20 };
+
+  it("is the position itself on a linear control", () => {
+    expect(valueAtPosition(linear, 42)).toBe(42);
+    expect(valueAtPosition(fps, 3.456789)).toBe(3.456789);
+  });
+
+  it("snaps 10^position to the camera's step on a log control", () => {
+    const value = valueAtPosition(exposure, Math.log10(200_000));
+    expect(Number.isInteger(value)).toBe(true);
+    expect((value - 92) % 78).toBe(0);
+    expect(Math.abs(value - 200_000)).toBeLessThanOrEqual(39);
+  });
+
+  it("stays inside [min, max] at the ends of the slider", () => {
+    expect(valueAtPosition(exposure, Math.log10(92))).toBe(92);
+    expect(valueAtPosition(exposure, Math.log10(4_000_000))).toBeLessThanOrEqual(4_000_000);
+    expect(valueAtPosition(exposure, 99)).toBe(4_000_000); // past the end: clamped to max
+  });
+});
+
+describe("serverValueOf", () => {
+  it("is the camera's value: cur, else the legacy value, else min", () => {
+    expect(serverValueOf({ label: "x", cur: 5, value: 9, min: 1 })).toBe(5);
+    expect(serverValueOf({ label: "x", value: 9, min: 1 } as ControlDescriptorV2)).toBe(9);
+    expect(serverValueOf({ label: "x", min: 1 } as ControlDescriptorV2)).toBe(1);
+    expect(serverValueOf({ label: "x" } as ControlDescriptorV2)).toBe(0);
   });
 });
