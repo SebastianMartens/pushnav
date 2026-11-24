@@ -122,6 +122,16 @@ internal sealed unsafe class UEyeApi : IUEyeApi
 
     public int DisableBinning(int camera) => UEyeNative.SetBinning(camera, UEyeConst.BinningDisable);
 
+    public int GetSupportedBinning(int camera, out int modes)
+    {
+        // The "get" variant returns the mask itself (not a status), like the gain read below.
+        int value = UEyeNative.SetBinning(camera, UEyeConst.GetSupportedBinning);
+        modes = Math.Max(0, value);
+        return value >= 0 ? UEyeConst.Success : value;
+    }
+
+    public int SetBinning(int camera, int mode) => UEyeNative.SetBinning(camera, mode);
+
     public int GetImageSize(int camera, out int width, out int height)
     {
         int* size = stackalloc int[2]; // IS_SIZE_2D

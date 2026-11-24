@@ -53,6 +53,14 @@ public class IdsBackendTests : IDisposable
             }
         }
 
+        public List<(byte[] Data, FrameKind Kind, StreamGeometry Geometry)> Snapshot()
+        {
+            lock (_gate)
+            {
+                return [.. _frames];
+            }
+        }
+
         public (byte[] Data, FrameKind Kind, StreamGeometry Geometry) First()
         {
             lock (_gate)
@@ -254,7 +262,34 @@ public class IdsBackendTests : IDisposable
         var fps = Control(backend, ControlIds.Fps);
         Assert.Equal(1.0, fps.Min);
         Assert.InRange(fps.Max, 19.0, 20.0);          // 50 ms exposure + headroom: 1e6 / 51 000 = 19.6
-        Assert.DoesNotContain(backend.Controls, c => c.Id == ControlIds.Binning); // binning is v2 (task 7.2)
+
+        // binning comes from IS_GET_SUPPORTED_BINNING (the fake camera offers 2x2) and restarts the stream
+        var binning = Control(backend, ControlIds.Binning);
+        Assert.Equal(ControlKind.Enum, binning.Kind);
+        Assert.True(binning.RestartsStream);
+        Assert.Equal([1d, 2d], binning.Options!.Select(o => o.Value));
+        Assert.Equal(["1x1", "2x2"], binning.Options!.Select(o => o.Label));
+        Assert.Equal(1, binning.Cur);
+    }
+
+    [Fact]
+    public void NoBinningIsAdvertisedForASensorThatOffersNone()
+    {
+        _api.SupportedBinningModes = 0;
+        var backend = CreateBackend();
+
+        Assert.DoesNotContain(backend.Controls, c => c.Id == ControlIds.Binning);
+    }
+
+    [Fact]
+    public void OnlyFactorsTheSensorSupportsOnBothAxesAreOffered()
+    {
+        _api.SupportedBinningModes = UEyeConst.BinningVertical2x | UEyeConst.BinningHorizontal2x
+                                     | UEyeConst.BinningVertical3x // horizontal 3x is missing: no 3x3
+                                     | UEyeConst.BinningVertical4x | UEyeConst.BinningHorizontal4x;
+        var backend = CreateBackend();
+
+        Assert.Equal([1d, 2d, 4d], Control(backend, ControlIds.Binning).Options!.Select(o => o.Value));
     }
 
     [Fact]
@@ -472,7 +507,7 @@ public class IdsBackendTests : IDisposable
         var backend = CreateBackend();
         _api.ClearCalls();
 
-        Assert.False(backend.SetControl("binning", 2).Accepted);
+        Assert.False(backend.SetControl("binning", 2).Accepted); // would restart the stream, which a caller without permission cannot announce
         Assert.False(backend.SetControl("nope", 1).Accepted);
         Assert.False(backend.SetControl(ControlIds.Gain, double.NaN).Accepted);
         Assert.Empty(_api.Calls);
@@ -511,6 +546,319 @@ public class IdsBackendTests : IDisposable
         Assert.Throws<CameraException>(() => backend.SetControl(ControlIds.Exposure, 20_000));
 
         Assert.Single(fatal);
+    }
+
+    // -- binning: the in-process restart (spec 5.5) ---------------------------------------------------------
+
+    private static List<int> Indices(IReadOnlyList<string> calls, string call) =>
+        calls.Select((c, i) => (c, i)).Where(t => t.c == call).Select(t => t.i).ToList();
+
+    private IdsBackend StartedBackend(out CollectingSink sink)
+    {
+        var backend = CreateBackend();
+        sink = new CollectingSink();
+        backend.Start(sink);
+        Assert.True(sink.WaitForFrames(1), "no frames arrived");
+        return backend;
+    }
+
+    [Fact]
+    public void ABinningChangeRestartsTheStreamInTheOrderOfSpec55()
+    {
+        var backend = StartedBackend(out var sink);
+        _api.ClearCalls();
+
+        Assert.True(backend.SetControlMayRestart(ControlIds.Binning, 2).Accepted);
+
+        // stop the capture, free the sequence, set the binning, allocate for the new size, capture again
+        var calls = _api.Calls;
+        int stop = calls.ToList().IndexOf("StopCapture");
+        int exitQueue = calls.ToList().IndexOf("ExitImageQueue");
+        int clear = calls.ToList().IndexOf("ClearSequence");
+        int lastFree = Indices(calls, "FreeImageMemory")[^1];
+        int set = calls.ToList().IndexOf("SetBinning 0x3");
+        int firstAlloc = calls.ToList().IndexOf("AllocImageMemory");
+        int initQueue = calls.ToList().IndexOf("InitImageQueue");
+        int start = calls.ToList().IndexOf("StartCapture");
+        Assert.True(stop >= 0 && stop < exitQueue && exitQueue < clear && clear < lastFree, string.Join(", ", calls));
+        Assert.True(lastFree < set && set < firstAlloc && firstAlloc < initQueue && initQueue < start, string.Join(", ", calls));
+        Assert.Equal(IdsBackend.BufferCount, _api.CallCount("FreeImageMemory"));
+        Assert.Equal(IdsBackend.BufferCount, _api.CallCount("AllocImageMemory"));
+        Assert.Equal(IdsBackend.BufferCount, _api.OpenBuffers);
+        Assert.Equal(2, _api.Binning);
+        Assert.Equal(new StreamGeometry(FakeUEyeApi.Width / 2, FakeUEyeApi.Height / 2, 2, PixelFormat.Gray8), backend.Geometry);
+        Assert.Equal(2, Control(backend, ControlIds.Binning).Cur);
+    }
+
+    [Fact]
+    public void AfterABinningChangeFramesHaveTheNewSizeAndTheOldSizeNeverComesBack()
+    {
+        var backend = StartedBackend(out var sink);
+        backend.SetControlMayRestart(ControlIds.Binning, 2);
+        int mark = sink.Count;
+
+        Assert.True(sink.WaitForFrames(mark + 3));
+        backend.Stop();
+
+        var frames = sink.Snapshot().Skip(mark).ToList();
+        var binned = new StreamGeometry(FakeUEyeApi.Width / 2, FakeUEyeApi.Height / 2, 2, PixelFormat.Gray8);
+        Assert.All(frames, f => Assert.Equal(binned, f.Geometry));
+        using var decoder = new WicGrayDecoder();
+        var image = decoder.Decode(frames[0].Data);
+        Assert.Equal((binned.Width, binned.Height), (image.Width, image.Height));
+        Assert.InRange(image.Pixels.Average(p => (double)p), 78, 82); // the fill value (80), not the row padding (255)
+    }
+
+    [Fact]
+    public void TheRestartStaysWellInsideItsBudgetOnTheFakeCamera()
+    {
+        // Spec 5.5 targets 500 ms. The fake camera answers at once, so this checks the backend's own work (stopping and
+        // starting the capture thread, rebuilding the timing table), with ample room for a slow CI runner. The first
+        // change is a warm-up for JIT and thread start; the next two are measured.
+        var backend = StartedBackend(out _);
+        backend.SetControlMayRestart(ControlIds.Binning, 2);
+
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        backend.SetControlMayRestart(ControlIds.Binning, 1);
+        long back = timer.ElapsedMilliseconds;
+        timer.Restart();
+        backend.SetControlMayRestart(ControlIds.Binning, 2);
+
+        Assert.True(back < 500, $"restart to 1x1 took {back} ms");
+        Assert.True(timer.ElapsedMilliseconds < 500, $"restart to 2x2 took {timer.ElapsedMilliseconds} ms");
+    }
+
+    [Fact]
+    public void TheFrameTimingIsMeasuredAgainAtTheNewBinning()
+    {
+        // A binned sensor reads out faster (modelled in the fake as N times quicker frames), so the same frame rate needs a
+        // lower pixel clock: 20 fps takes 59 MHz at 1x1 but only 30 MHz at 2x2.
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 5_000);
+        backend.SetControl(ControlIds.Fps, 20);
+        Assert.Equal(59u, _api.PixelClockMhz);
+
+        backend.SetControlMayRestart(ControlIds.Binning, 2);
+        backend.SetControl(ControlIds.Fps, 20);
+
+        Assert.Equal(30u, _api.PixelClockMhz);
+        Assert.Equal(20.0, _api.FrameRate, precision: 3);
+    }
+
+    [Fact]
+    public void ExposureAndPreferredFrameRateSurviveABinningChangeAndTheCouplingIsReported()
+    {
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 200_000); // exposure priority: fps drops to about 5
+        double fpsBefore = Control(backend, ControlIds.Fps).Cur;
+
+        backend.SetControlMayRestart(ControlIds.Binning, 2);
+
+        Assert.Equal(200_000, Control(backend, ControlIds.Exposure).Cur);
+        Assert.Equal(fpsBefore, Control(backend, ControlIds.Fps).Cur, precision: 1);
+        Assert.InRange(Control(backend, ControlIds.Fps).Max, 4.9, 5.0); // still limited by the exposure
+
+        backend.SetControl(ControlIds.Exposure, 10_000);
+
+        Assert.Equal(10.0, Control(backend, ControlIds.Fps).Cur); // the preferred rate was kept through the restart
+    }
+
+    [Fact]
+    public void ABinningChangeIsRefusedWithoutThePermissionToRestartAndTouchesNothing()
+    {
+        var backend = StartedBackend(out _);
+        _api.ClearCalls();
+
+        var result = backend.SetControl(ControlIds.Binning, 2); // what a v1 session would send, if it could
+
+        Assert.False(result.Accepted);
+        Assert.Contains("cannot announce", result.Message);
+        Assert.Empty(_api.Calls);
+        Assert.False(((ICameraBackend)backend).WouldRestartStream(new ControlChange(ControlIds.Binning, 2)));
+        Assert.True(((ICameraBackend)backend).WouldRestartStream(new ControlChange(ControlIds.Binning, 2, MayRestartStream: true)));
+    }
+
+    [Fact]
+    public void TheBinningItAlreadyHasOrOneItDoesNotOfferIsNoRestart()
+    {
+        var backend = StartedBackend(out _);
+        _api.ClearCalls();
+
+        Assert.True(backend.SetControlMayRestart(ControlIds.Binning, 1).Accepted); // current value
+        Assert.False(backend.SetControlMayRestart(ControlIds.Binning, 3).Accepted); // not an option
+
+        Assert.Empty(_api.Calls);
+        Assert.False(((ICameraBackend)backend).WouldRestartStream(new ControlChange(ControlIds.Binning, 1, MayRestartStream: true)));
+        Assert.False(((ICameraBackend)backend).WouldRestartStream(new ControlChange(ControlIds.Binning, 3, MayRestartStream: true)));
+    }
+
+    [Fact]
+    public void ABinningModeTheCameraRefusesIsRejectedAndTheStreamKeepsRunningAtTheOldSize()
+    {
+        var backend = StartedBackend(out var sink);
+        _api.SetBinningStatus = UEyeConst.NotSupported;
+
+        var result = backend.SetControlMayRestart(ControlIds.Binning, 2);
+
+        Assert.False(result.Accepted);
+        Assert.Contains("did not take binning 2x2", result.Message);
+        Assert.Equal(1, Control(backend, ControlIds.Binning).Cur);
+        Assert.Equal(new StreamGeometry(FakeUEyeApi.Width, FakeUEyeApi.Height, 1, PixelFormat.Gray8), backend.Geometry);
+        int mark = sink.Count;
+        Assert.True(sink.WaitForFrames(mark + 3), "the stream did not come back after the refused change");
+        Assert.Equal(IdsBackend.BufferCount, _api.OpenBuffers);
+    }
+
+    [Fact]
+    public void AStreamThatCannotBeRestartedIsACameraException()
+    {
+        var backend = StartedBackend(out _);
+        _api.StartCaptureStatus = UEyeConst.NoSuccess;
+
+        var ex = Assert.Throws<CameraException>(() => backend.SetControlMayRestart(ControlIds.Binning, 2));
+
+        Assert.Contains("restart capture", ex.Message);
+    }
+
+    [Fact]
+    public void BinningIsRefusedWhileLongExposureModeIsOnAndNothingIsAnnounced()
+    {
+        var backend = StartedBackend(out _);
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        _api.ClearCalls();
+
+        var result = backend.SetControlMayRestart(ControlIds.Binning, 2);
+
+        Assert.False(result.Accepted);
+        Assert.Contains("long-exposure mode", result.Message);
+        Assert.Empty(_api.Calls);
+        Assert.False(((ICameraBackend)backend).WouldRestartStream(new ControlChange(ControlIds.Binning, 2, MayRestartStream: true)));
+    }
+
+    [Fact]
+    public void ABinningChangeBeforeCaptureStartedDoesNotStartTheCapture()
+    {
+        var backend = CreateBackend();
+        _api.ClearCalls();
+
+        Assert.True(backend.SetControlMayRestart(ControlIds.Binning, 2).Accepted);
+
+        Assert.Equal(0, _api.CallCount("StartCapture"));
+        Assert.Equal(0, _api.CallCount("StopCapture"));
+        Assert.Equal(IdsBackend.BufferCount, _api.OpenBuffers);
+        Assert.Equal(FakeUEyeApi.Width / 2, backend.Geometry.Width);
+    }
+
+    // -- leaving long-exposure mode (Q12) ----------------------------------------------------------------
+
+    [Fact]
+    public void LeavingLongExposureModeNeedsThePermissionToRestartAndAnExposureInTheNormalRange()
+    {
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        ICameraBackend b = backend;
+
+        Assert.True(b.WouldRestartStream(new ControlChange(ControlIds.Exposure, 30_000, MayRestartStream: true)));
+        Assert.False(b.WouldRestartStream(new ControlChange(ControlIds.Exposure, 30_000)));                         // a v1 session: sticky
+        Assert.False(b.WouldRestartStream(new ControlChange(ControlIds.Exposure, 2_500_000, MayRestartStream: true))); // still long
+        Assert.False(b.WouldRestartStream(new ControlChange(ControlIds.Gain, 50, MayRestartStream: true)));
+    }
+
+    [Fact]
+    public void InNormalModeNoExposureChangeEverRestartsTheStream()
+    {
+        var backend = CreateBackend();
+        ICameraBackend b = backend;
+
+        Assert.False(b.WouldRestartStream(new ControlChange(ControlIds.Exposure, 30_000, MayRestartStream: true)));
+        Assert.False(b.WouldRestartStream(new ControlChange(ControlIds.Exposure, 3_000_000, MayRestartStream: true))); // enters long mode: no gap to wrap
+    }
+
+    [Fact]
+    public void LeavingLongExposureModeRestartsTheStreamAndGivesTheFrameRateBack()
+    {
+        var backend = StartedBackend(out var sink);
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        var fps = Control(backend, ControlIds.Fps);
+        Assert.Equal(fps.Min, fps.Max); // fixed in long mode
+        _api.ClearCalls();
+
+        Assert.True(backend.SetControlMayRestart(ControlIds.Exposure, 30_000).Accepted);
+
+        var calls = _api.Calls.ToList();
+        int stop = calls.IndexOf("StopCapture");
+        int leave = calls.IndexOf("SetLongExposure False");
+        int rate = calls.IndexOf("SetFrameRate 10");
+        int exposure = calls.IndexOf("SetExposure 30");
+        int start = calls.IndexOf("StartCapture");
+        Assert.True(stop >= 0 && stop < leave && leave < rate && rate < exposure && exposure < start, string.Join(", ", calls));
+        Assert.Equal(0, _api.CallCount("AllocImageMemory")); // same geometry: the buffers stay
+        Assert.Equal(0, _api.CallCount("FreeImageMemory"));
+        Assert.False(_api.LongExposureEnabled);
+        Assert.Equal(30.0, _api.ExposureMs, precision: 3);
+        Assert.Equal(10.0, _api.FrameRate, precision: 3); // the preferred rate again, not the 1 fps the camera drops to
+        var after = Control(backend, ControlIds.Fps);
+        Assert.True(after.Max > after.Min, "fps must be settable again");
+        Assert.Equal(10.0, after.Cur);
+        Assert.Equal(new StreamGeometry(FakeUEyeApi.Width, FakeUEyeApi.Height, 1, PixelFormat.Gray8), backend.Geometry);
+
+        Assert.True(backend.SetControl(ControlIds.Fps, 4).Accepted);
+        Assert.Equal(4.0, _api.FrameRate, precision: 3);
+        int mark = sink.Count;
+        Assert.True(sink.WaitForFrames(mark + 3), "frames did not resume after leaving long mode");
+    }
+
+    [Fact]
+    public void AnExposureStillBeyondTheNormalRangeKeepsLongModeEvenForACallerThatMayRestart()
+    {
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        _api.ClearCalls();
+
+        Assert.True(backend.SetControlMayRestart(ControlIds.Exposure, 2_500_000).Accepted);
+
+        Assert.Equal(new[] { "SetExposure 2500" }, _api.Calls);
+        Assert.True(_api.LongExposureEnabled);
+    }
+
+    [Fact]
+    public void ACallerThatCannotAnnounceARestartKeepsLongModeStickyAsInV1()
+    {
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        _api.ClearCalls();
+
+        Assert.True(backend.SetControl(ControlIds.Exposure, 30_000).Accepted);
+
+        Assert.Equal(new[] { "SetExposure 30" }, _api.Calls);
+        Assert.True(_api.LongExposureEnabled);
+    }
+
+    [Fact]
+    public void LongModeCanBeEnteredAgainAfterLeavingIt()
+    {
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        backend.SetControlMayRestart(ControlIds.Exposure, 30_000);
+        _api.ClearCalls();
+
+        backend.SetControl(ControlIds.Exposure, 3_000_000);
+
+        Assert.True(_api.LongExposureEnabled);
+        Assert.Contains("SetLongExposure True", _api.Calls);
+        Assert.Equal(3000.0, _api.ExposureMs, precision: 3);
+    }
+
+    [Fact]
+    public void AFailureLeavingLongModeIsACameraException()
+    {
+        var backend = CreateBackend();
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        _api.LeaveLongExposureStatus = UEyeConst.InvalidParameter;
+
+        var ex = Assert.Throws<CameraException>(() => backend.SetControlMayRestart(ControlIds.Exposure, 30_000));
+
+        Assert.Contains("leave long exposure", ex.Message);
     }
 
     // -- capture -----------------------------------------------------------------------------------------------

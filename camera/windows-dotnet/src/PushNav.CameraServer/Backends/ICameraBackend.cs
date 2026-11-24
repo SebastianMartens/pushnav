@@ -77,6 +77,18 @@ internal readonly record struct ControlResult(bool Accepted, string? Message = n
     public static ControlResult Rejected(string message) => new(false, message);
 }
 
+/// <summary>One SET_CONTROL as a backend receives it: the control, the value asked for, and what the caller is prepared to handle.</summary>
+/// <param name="Id">Control id.</param>
+/// <param name="Value">Requested value in the backend's native unit (clamped and rounded by the backend).</param>
+/// <param name="MayRestartStream">
+/// True when the caller announces a stream restart to its client (a v2 session: STREAM_INFO <c>reconfiguring</c>, then
+/// <c>streaming</c> with the next generation, protocol 11.5), so the backend <b>may</b> restart the stream for this change. Without
+/// it the backend must not: a change that would need a restart is rejected, and a change that only sometimes restarts (the IDS
+/// camera leaves long-exposure mode only if it may) takes the way that does not. A v1 session never sets it: a v1 client has no way
+/// to be told, and its stall timeout would fire. The backend stays ignorant of the protocol version, it only reads the caller's intent.
+/// </param>
+internal readonly record struct ControlChange(string Id, double Value, bool MayRestartStream = false);
+
 /// <summary>Something went wrong talking to the camera.</summary>
 internal sealed class CameraException : Exception
 {
@@ -119,20 +131,28 @@ internal interface ICameraBackend : IDisposable
     /// <summary>Snapshot of all controls with real units, ranges and current values. Thread-safe.</summary>
     IReadOnlyList<ControlDescriptor> Controls { get; }
 
-    /// <summary>Applies a control change (clamped and rounded per the protocol); may change other controls or the geometry.</summary>
-    ControlResult SetControl(string id, double value);
+    /// <summary>
+    /// Applies a control change (clamped and rounded per the protocol); may change other controls or the geometry. It restarts the
+    /// stream only when <see cref="WouldRestartStream"/> says so for the same <paramref name="change"/>, which implies
+    /// <see cref="ControlChange.MayRestartStream"/>: the caller has announced the restart.
+    /// </summary>
+    ControlResult SetControl(ControlChange change);
 
     /// <summary>
-    /// True if <see cref="SetControl"/> with these arguments restarts the stream (new geometry or restart of the capture), so a v2
-    /// session wraps it in STREAM_INFO <c>reconfiguring</c> and <c>streaming</c> with the next generation (protocol 11.5). The
-    /// default is every change of a control that is marked <see cref="ControlDescriptor.RestartsStream"/> to a value that is
-    /// accepted and differs from the current one. A backend overrides it when whether a change restarts depends on more than the
-    /// descriptor (say, a long-exposure mode that is left only when the exposure drops back into the normal range).
+    /// True if <see cref="SetControl"/> with this change restarts the stream (new geometry or restart of the capture), so a v2
+    /// session wraps it in STREAM_INFO <c>reconfiguring</c> and <c>streaming</c> with the next generation (protocol 11.5). Never
+    /// true without <see cref="ControlChange.MayRestartStream"/>. The default is every change of a control that is marked
+    /// <see cref="ControlDescriptor.RestartsStream"/> to a value that is accepted and differs from the current one. A backend
+    /// overrides it when whether a change restarts depends on more than the descriptor: the IDS backend leaves long-exposure mode,
+    /// which gaps the stream, when the exposure drops back into the normal range, and refuses a binning change while that mode is on.
     /// </summary>
-    bool RestartsStream(string id, double value)
+    bool WouldRestartStream(ControlChange change)
     {
-        var control = Controls.FirstOrDefault(c => c.Id == id);
-        return control is { RestartsStream: true } && control.TryCoerce(value, out double coerced) && coerced != control.Cur;
+        var control = Controls.FirstOrDefault(c => c.Id == change.Id);
+        return change.MayRestartStream
+               && control is { RestartsStream: true }
+               && control.TryCoerce(change.Value, out double coerced)
+               && coerced != control.Cur;
     }
 
     /// <summary>Starts producing frames on a backend thread, pushing JPEG frames into <paramref name="sink"/>.</summary>

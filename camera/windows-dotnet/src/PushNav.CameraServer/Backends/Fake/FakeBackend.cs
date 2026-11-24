@@ -120,8 +120,9 @@ internal sealed class FakeBackend : ICameraBackend
                   (_imagesDirectory == null ? " (synthetic star field)" : $" from {_imagesDirectory}"));
     }
 
-    public ControlResult SetControl(string id, double value)
+    public ControlResult SetControl(ControlChange change)
     {
+        var (id, value, mayRestartStream) = change;
         ArgumentNullException.ThrowIfNull(id);
 
         if (id == ControlIds.Binning)
@@ -131,14 +132,14 @@ internal sealed class FakeBackend : ICameraBackend
             {
                 lock (_gate)
                 {
-                    return ApplyLocked(id, value);
+                    return ApplyLocked(id, value, mayRestartStream);
                 }
             }
         }
 
         lock (_gate)
         {
-            var result = ApplyLocked(id, value);
+            var result = ApplyLocked(id, value, mayRestartStream);
             if (result.Accepted)
             {
                 _wake.Set(); // pace changes (fps, exposure) take effect at once
@@ -192,7 +193,7 @@ internal sealed class FakeBackend : ICameraBackend
 
     // -- controls -----------------------------------------------------------
 
-    private ControlResult ApplyLocked(string id, double value)
+    private ControlResult ApplyLocked(string id, double value, bool mayRestartStream)
     {
         var controls = BuildControls();
         var control = controls.FirstOrDefault(c => c.Id == id);
@@ -204,6 +205,11 @@ internal sealed class FakeBackend : ICameraBackend
         if (!control.TryCoerce(value, out double coerced))
         {
             return ControlResult.Rejected($"value {value} not accepted for '{id}'");
+        }
+
+        if (control.RestartsStream && coerced != control.Cur && !mayRestartStream)
+        {
+            return ControlResult.Rejected($"'{id}' restarts the stream, which this session cannot announce");
         }
 
         switch (id)

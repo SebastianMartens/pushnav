@@ -9,20 +9,39 @@ namespace PushNav.CameraServer.Tests;
 
 /// <summary>
 /// A <see cref="FakeBackend"/> (synthetic star field, 1936x1216, binning 1 or 2) with hooks to script what a real camera might do:
-/// answer or throw in <see cref="ICameraBackend.SetControl"/>, say which changes restart the stream, and hold back the controls.
+/// answer or throw in <see cref="ICameraBackend.SetControl"/>, say which changes restart the stream, and run code when the controls are first read.
+/// Every <see cref="ControlChange"/> it receives is kept in <see cref="Changes"/>.
 /// </summary>
 internal sealed class ScriptedBackend : ICameraBackend
 {
     private readonly FakeBackend _inner = new(null, 90, new Logger(TextWriter.Null, LogLevel.Debug));
+    private readonly List<ControlChange> _changes = [];
+    private Action? _beforeFirstControlsRead;
 
     /// <summary>Runs first in <c>SetControl</c>; may throw; a non-null result replaces the fake's own handling.</summary>
     public Func<string, double, ControlResult?>? OnSetControl { get; set; }
 
-    /// <summary>Replaces the default answer of <see cref="ICameraBackend.RestartsStream"/> when it returns non-null.</summary>
-    public Func<string, double, bool?>? RestartsStreamOverride { get; set; }
+    /// <summary>Replaces the default answer of <see cref="ICameraBackend.WouldRestartStream"/> when it returns non-null.</summary>
+    public Func<ControlChange, bool?>? WouldRestartStreamOverride { get; set; }
 
-    /// <summary>When set, reading <see cref="Controls"/> waits until it is signalled.</summary>
-    public ManualResetEventSlim? ControlsGate { get; set; }
+    /// <summary>Every change <c>SetControl</c> received, in order.</summary>
+    public IReadOnlyList<ControlChange> Changes
+    {
+        get
+        {
+            lock (_changes)
+            {
+                return _changes.ToArray();
+            }
+        }
+    }
+
+    /// <summary>Runs once, on the thread that reads <see cref="Controls"/> first, before that read returns.</summary>
+    public Action? BeforeFirstControlsRead
+    {
+        get => _beforeFirstControlsRead;
+        set => _beforeFirstControlsRead = value;
+    }
 
     public string Id => _inner.Id;
 
@@ -40,7 +59,7 @@ internal sealed class ScriptedBackend : ICameraBackend
     {
         get
         {
-            ControlsGate?.Wait(TimeSpan.FromSeconds(10));
+            Interlocked.Exchange(ref _beforeFirstControlsRead, null)?.Invoke();
             return _inner.Controls;
         }
     }
@@ -55,10 +74,18 @@ internal sealed class ScriptedBackend : ICameraBackend
 
     public void Open(DeviceInfo device) => _inner.Open(device);
 
-    public ControlResult SetControl(string id, double value) => OnSetControl?.Invoke(id, value) ?? _inner.SetControl(id, value);
+    public ControlResult SetControl(ControlChange change)
+    {
+        lock (_changes)
+        {
+            _changes.Add(change);
+        }
 
-    public bool RestartsStream(string id, double value) =>
-        RestartsStreamOverride?.Invoke(id, value) ?? ((ICameraBackend)_inner).RestartsStream(id, value);
+        return OnSetControl?.Invoke(change.Id, change.Value) ?? _inner.SetControl(change);
+    }
+
+    public bool WouldRestartStream(ControlChange change) =>
+        WouldRestartStreamOverride?.Invoke(change) ?? ((ICameraBackend)_inner).WouldRestartStream(change);
 
     public void Start(IFrameSink sink) => _inner.Start(sink);
 

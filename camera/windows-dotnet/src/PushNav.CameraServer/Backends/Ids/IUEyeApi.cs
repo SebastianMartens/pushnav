@@ -50,6 +50,15 @@ internal interface IUEyeApi
 
     int DisableBinning(int camera);
 
+    /// <summary>
+    /// <c>IS_GET_SUPPORTED_BINNING</c>: a bit mask of the binning modes the sensor offers (see <see cref="IdsBinning"/>); not a status.
+    /// A negative status means the camera could not say, which counts as "no binning".
+    /// </summary>
+    int GetSupportedBinning(int camera, out int modes);
+
+    /// <summary>Sets binning with a <c>IS_BINNING_*</c> mode (<see cref="IdsBinning.ModeFor"/>); the image size follows (read it with <see cref="GetImageSize"/>).</summary>
+    int SetBinning(int camera, int mode);
+
     /// <summary>Size of the current image area of interest.</summary>
     int GetImageSize(int camera, out int width, out int height);
 

@@ -37,7 +37,25 @@ internal static class UEyeConst
     public const int ColorModeMono8 = 6;
     public const int DisplayModeDib = 1;
     public const int BinningDisable = 0;
+    public const int GetSupportedBinning = 0x8001;
     public const int IgnoreParameter = -1;
+
+    // -- is_SetBinning: one bit per axis and factor (read from the installed uEye .NET interface, BinningMode) ---------------
+    // Binning N x N is the vertical and the horizontal bit of N together; see IdsBinning.
+    public const int BinningVertical2x = 0x1;
+    public const int BinningHorizontal2x = 0x2;
+    public const int BinningVertical4x = 0x4;
+    public const int BinningHorizontal4x = 0x8;
+    public const int BinningVertical3x = 0x10;
+    public const int BinningHorizontal3x = 0x20;
+    public const int BinningVertical5x = 0x40;
+    public const int BinningHorizontal5x = 0x80;
+    public const int BinningVertical6x = 0x100;
+    public const int BinningHorizontal6x = 0x200;
+    public const int BinningVertical8x = 0x400;
+    public const int BinningHorizontal8x = 0x800;
+    public const int BinningVertical16x = 0x1000;
+    public const int BinningHorizontal16x = 0x2000;
 
     // -- is_SetAutoParameter -------------------------------------------------------------------------
     public const int SetEnableAutoGain = 0x8800;

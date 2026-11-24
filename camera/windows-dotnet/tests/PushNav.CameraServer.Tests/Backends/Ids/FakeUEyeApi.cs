@@ -37,6 +37,7 @@ internal sealed unsafe class FakeUEyeApi : IUEyeApi, IDisposable
     private readonly HashSet<uint> _events = [];
     private int _nextMemoryId = 100;
     private int _clockIndex = 3;       // 237 MHz, like the camera's default
+    private int _binning = 1;          // N of NxN
     private double _fps = 25;
     private double _exposureMs = 10;
     private bool _long;
@@ -57,6 +58,15 @@ internal sealed unsafe class FakeUEyeApi : IUEyeApi, IDisposable
     public int SensorInfoStatus { get; set; }
 
     public bool LongExposureSupported { get; set; } = true;
+
+    /// <summary>What <c>IS_GET_SUPPORTED_BINNING</c> answers: 2x2 by default (vertical and horizontal 2x).</summary>
+    public int SupportedBinningModes { get; set; } = UEyeConst.BinningVertical2x | UEyeConst.BinningHorizontal2x;
+
+    /// <summary>Status <c>SetBinning</c> fails with (0 = succeed); the binning stays as it was.</summary>
+    public int SetBinningStatus { get; set; }
+
+    /// <summary>Status <c>SetLongExposureEnabled(false)</c> fails with (0 = succeed).</summary>
+    public int LeaveLongExposureStatus { get; set; }
 
     /// <summary>Makes <c>GetCameraList</c> throw, like an older runtime missing an entry point.</summary>
     public bool ThrowOnGetCameraList { get; set; }
@@ -129,6 +139,14 @@ internal sealed unsafe class FakeUEyeApi : IUEyeApi, IDisposable
 
     public bool LongExposureEnabled => _long;
 
+    /// <summary>N of the NxN binning the camera runs at.</summary>
+    public int Binning => _binning;
+
+    /// <summary>Width of the frames now (the sensor width divided by the binning).</summary>
+    public int CurrentWidth => Width / _binning;
+
+    public int CurrentHeight => Height / _binning;
+
     public int Gain => _gain;
 
     public int OpenBuffers
@@ -179,7 +197,10 @@ internal sealed unsafe class FakeUEyeApi : IUEyeApi, IDisposable
 
     private (uint Mhz, double MinFrameMs, double MinExposureMs, double LongMaxMs) Clock => ClockTable[_clockIndex];
 
-    private double MaxFpsNow => 1000.0 / Clock.MinFrameMs;
+    // A binned sensor reads out N times fewer rows (modelled, not measured), so its frames can be N times quicker.
+    private double MinFrameMsNow => Clock.MinFrameMs / _binning;
+
+    private double MaxFpsNow => 1000.0 / MinFrameMsNow;
 
     private double NormalExposureMaxMs => (1000.0 / _fps) - (0.75 * 30.0 / Clock.Mhz);
 
@@ -253,13 +274,41 @@ internal sealed unsafe class FakeUEyeApi : IUEyeApi, IDisposable
     public int DisableBinning(int camera)
     {
         Log("DisableBinning");
+        _binning = 1;
         return UEyeConst.Success;
+    }
+
+    public int GetSupportedBinning(int camera, out int modes)
+    {
+        modes = SupportedBinningModes;
+        return UEyeConst.Success;
+    }
+
+    public int SetBinning(int camera, int mode)
+    {
+        Log($"SetBinning 0x{mode:X}");
+        if (SetBinningStatus != 0)
+        {
+            return SetBinningStatus;
+        }
+
+        foreach (int factor in new[] { 2, 3, 4, 5, 6, 8, 16 })
+        {
+            if (mode == IdsBinning.ModeFor(factor) && (SupportedBinningModes & mode) == mode)
+            {
+                _binning = factor;
+                _fps = Math.Clamp(_fps, 1.0, MaxFpsNow);
+                return UEyeConst.Success;
+            }
+        }
+
+        return UEyeConst.NotSupported;
     }
 
     public int GetImageSize(int camera, out int width, out int height)
     {
-        width = Width;
-        height = Height;
+        width = CurrentWidth;
+        height = CurrentHeight;
         return UEyeConst.Success;
     }
 
@@ -299,7 +348,7 @@ internal sealed unsafe class FakeUEyeApi : IUEyeApi, IDisposable
 
     public int GetFrameTimeRange(int camera, out double min, out double max, out double increment)
     {
-        min = Clock.MinFrameMs / 1000.0;
+        min = MinFrameMsNow / 1000.0;
         max = 1.0;
         increment = 0.0001;
         return UEyeConst.Success;
@@ -332,6 +381,11 @@ internal sealed unsafe class FakeUEyeApi : IUEyeApi, IDisposable
     public int SetLongExposureEnabled(int camera, bool enabled)
     {
         Log($"SetLongExposure {enabled}");
+        if (!enabled && LeaveLongExposureStatus != 0)
+        {
+            return LeaveLongExposureStatus;
+        }
+
         if (_long && !enabled)
         {
             _fps = 1.0; // leaving long mode drops back to the slowest frame rate (the caller has to re-apply its own)
@@ -464,10 +518,11 @@ internal sealed unsafe class FakeUEyeApi : IUEyeApi, IDisposable
 
         // A frame with the image in the first Width bytes of each row and junk in the pitch padding.
         var rows = (byte*)memory;
-        for (int y = 0; y < Height; y++)
+        int width = CurrentWidth;
+        for (int y = 0; y < CurrentHeight; y++)
         {
-            new Span<byte>(rows + ((long)y * Pitch), Width).Fill(_fill);
-            new Span<byte>(rows + ((long)y * Pitch) + Width, Pitch - Width).Fill(255);
+            new Span<byte>(rows + ((long)y * Pitch), width).Fill(_fill);
+            new Span<byte>(rows + ((long)y * Pitch) + width, Pitch - width).Fill(255);
         }
 
         return UEyeConst.Success;
