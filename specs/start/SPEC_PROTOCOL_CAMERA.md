@@ -301,8 +301,8 @@ Key classes in the backend:
 ## 11. Protocol v2 (Draft — issue #3)
 
 Status: Approved (PR #8). The Python engine (client, liveness, control
-restore) and the Python mock implement §11 since slice S3; no real server
-offers v2 yet. The order of work is the slice plan in
+restore) and the Python mock implement §11 since slice S3; the Windows C# server
+implements it since slice S5 (the Fake backend, and IDS without binning). The order of work is the slice plan in
 `SPEC_CAMERA_CONTROLS.md` §10.8. The C# server already sends its real stream
 size in HELLO (v1).
 Engine/config/UI side: `specs/camera-server/SPEC_CAMERA_CONTROLS.md`.
