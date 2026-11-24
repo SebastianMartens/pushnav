@@ -65,7 +65,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex flex-col gap-2">
-                  <CameraControls controls={state.controls} />
+                  <CameraControls controls={state.controls} stream={state.camera.stream} />
                   <Connectivity state={state} />
                   <Settings
                     state={state}
