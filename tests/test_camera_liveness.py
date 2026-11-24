@@ -19,8 +19,8 @@ from tests.mock_camera_server import MockCameraServer
 from tests.test_subprocess_mgr import _NoopSubprocessManager
 
 
-def _info(interval_us=None, state="streaming", received_at=0.0):
-    return stream.StreamInfo(1, state, 640, 360, 1, "JPEG", interval_us, None, received_at)
+def _info(interval_us=None, state="streaming", reconfiguring_since=None):
+    return stream.StreamInfo(1, state, 640, 360, 1, "JPEG", interval_us, None, reconfiguring_since)
 
 
 def _wait_state(sm, state, timeout):
@@ -51,25 +51,25 @@ class TestTimeoutFormula:
 
 class TestV2Stall:
     def test_any_message_counts_not_only_frames(self):
-        stall, timeout = stream.v2_stall(now=100.0, last_activity=99.5, floor_s=2.0, info=_info(100_000))
+        stall, timeout = stream.stall_since_last_activity(now=100.0, last_activity=99.5, floor_s=2.0, info=_info(100_000))
         assert (stall, timeout) == (0.5, 2.0)
 
     def test_the_stall_grows_without_messages(self):
-        stall, timeout = stream.v2_stall(now=100.0, last_activity=90.0, floor_s=2.0, info=_info(100_000))
+        stall, timeout = stream.stall_since_last_activity(now=100.0, last_activity=90.0, floor_s=2.0, info=_info(100_000))
         assert stall == 10.0 and stall > timeout
 
     def test_a_long_interval_raises_the_limit(self):
-        stall, timeout = stream.v2_stall(now=100.0, last_activity=93.0, floor_s=2.0, info=_info(4_000_000))
+        stall, timeout = stream.stall_since_last_activity(now=100.0, last_activity=93.0, floor_s=2.0, info=_info(4_000_000))
         assert stall == 7.0 and timeout == 9.0 and stall < timeout
 
     def test_reconfiguring_suspends_stall_detection(self):
-        info = _info(100_000, "reconfiguring", received_at=96.0)
-        stall, timeout = stream.v2_stall(now=100.0, last_activity=80.0, floor_s=2.0, info=info)
+        info = _info(100_000, "reconfiguring", reconfiguring_since=96.0)
+        stall, timeout = stream.stall_since_last_activity(now=100.0, last_activity=80.0, floor_s=2.0, info=info)
         assert stall == 0.0 and timeout == 2.0
 
     def test_the_suspension_ends_after_five_seconds(self):
-        info = _info(100_000, "reconfiguring", received_at=94.0)
-        stall, timeout = stream.v2_stall(now=100.0, last_activity=80.0, floor_s=2.0, info=info)
+        info = _info(100_000, "reconfiguring", reconfiguring_since=94.0)
+        stall, timeout = stream.stall_since_last_activity(now=100.0, last_activity=80.0, floor_s=2.0, info=info)
         assert stall == 20.0 and stall > timeout
         assert stream.RECONFIGURE_GRACE_S == 5.0
 
@@ -158,7 +158,7 @@ class TestAgainstSlowFrames:
             mgr.start()
             time.sleep(0.3)
             mgr.client.set_control("binning", 2)
-            # no frames for 2.5 s, more than the 1.1 s timeout (2 * 0.05 + 1.0), but "reconfiguring"
+            # no frames for 2.5 s, more than the 1.2 s timeout (2 * 0.1 + 1.0, the mock caps fps at 10), but "reconfiguring"
             time.sleep(1.6)
             assert mgr.client.stream_info.reconfiguring
             time.sleep(2.0)
@@ -185,3 +185,21 @@ class TestAgainstSlowFrames:
         finally:
             mgr.stop()
             server.stop(timeout=0.5)
+
+
+class TestStallLog:
+    def test_a_v1_session_logs_the_upstream_text(self, caplog):
+        class V1:
+            session_version = 1
+
+        with caplog.at_level("WARNING", logger="evf.camera.subprocess_mgr"):
+            SubprocessManager._fork_log_stall(V1(), 2.5, 2.0)
+        assert "No frames for 2.5s — treating as stall, starting recovery" in caplog.text
+
+    def test_a_v2_session_says_messages_and_the_limit(self, caplog):
+        class V2:
+            session_version = 2
+
+        with caplog.at_level("WARNING", logger="evf.camera.subprocess_mgr"):
+            SubprocessManager._fork_log_stall(V2(), 10.0, 9.0)
+        assert "No message from the camera for 10.0s (limit 9.0s)" in caplog.text

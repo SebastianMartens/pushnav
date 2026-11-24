@@ -746,7 +746,7 @@ class Engine:
                 audio=self._audio,
                 solver_params=self._camera_profile.params,  # fork: camera-controls
                 fov_tracker=self._camera_profile,  # fork: camera-controls (FOV learning, search)
-                expected_frame_size=self._camera_profile.expected_frame_size,  # fork: camera-controls
+                frame_size_guard=self._camera_profile.frame_size_guard,  # fork: camera-controls
             )
             # Wire solver failure count into web server for audio event detection
             if self._webserver is not None:

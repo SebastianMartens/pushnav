@@ -71,7 +71,6 @@ def jpeg_size(jpeg_bytes: bytes) -> StreamGeometry | None:
 
 # -- v2: STREAM_INFO (protocol section 11.5) -----------------------------------
 
-STATE_STREAMING = "streaming"
 STATE_RECONFIGURING = "reconfiguring"
 
 
@@ -79,8 +78,9 @@ STATE_RECONFIGURING = "reconfiguring"
 class StreamInfo:
     """One STREAM_INFO message: what the camera is streaming right now.
 
-    ``received_at`` (``time.monotonic()``) is when the reconfiguration began for a
-    ``"reconfiguring"`` info: stall detection waits for it only for a limited time.
+    ``reconfiguring_since`` (``time.monotonic()``) is when the current reconfiguration
+    began, None for a stream that is not reconfiguring: stall detection waits for a
+    reconfiguration only for a limited time.
     """
 
     generation: int
@@ -91,7 +91,7 @@ class StreamInfo:
     frame_format: str = "JPEG"
     frame_interval_us: int | None = None
     exposure_us: int | None = None
-    received_at: float = 0.0
+    reconfiguring_since: float | None = None
 
     @property
     def geometry(self) -> StreamGeometry:
@@ -151,10 +151,11 @@ def parse_stream_info(payload: bytes, previous: StreamInfo | None, now: float) -
     if not isinstance(frame_format, str) or not frame_format:
         frame_format = previous.frame_format if previous else "JPEG"
     exposure = _positive_int(data.get("exposure_us"))
-    received_at = now
-    if (previous is not None and previous.reconfiguring and state == STATE_RECONFIGURING
-            and previous.generation == generation):
-        received_at = previous.received_at  # the same reconfiguration, not a new one
+    reconfiguring_since = None
+    if state == STATE_RECONFIGURING:
+        reconfiguring_since = now
+        if previous is not None and previous.reconfiguring and previous.generation == generation:
+            reconfiguring_since = previous.reconfiguring_since  # the same reconfiguration, not a new one
     return StreamInfo(
         generation=generation,
         state=state,
@@ -164,8 +165,51 @@ def parse_stream_info(payload: bytes, previous: StreamInfo | None, now: float) -
         frame_format=frame_format,
         frame_interval_us=interval,
         exposure_us=exposure,
-        received_at=received_at,
+        reconfiguring_since=reconfiguring_since,
     )
+
+
+class StreamInfoTracker:
+    """The latest STREAM_INFO of a session, with its lock and FRAME_RAW bookkeeping.
+
+    ``CameraClient`` owns one. ``update()`` is called from the handshake and from
+    the receiver thread; ``latest`` can be read from any thread.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._latest: StreamInfo | None = None
+        self._frame_raw_logged = False
+
+    @property
+    def latest(self) -> StreamInfo | None:
+        with self._lock:
+            return self._latest
+
+    def update(self, payload: bytes, now: float) -> tuple[StreamInfo, bool] | None:
+        """Parse and keep a STREAM_INFO.
+
+        Returns ``(info, new_generation)``, or None if the payload is unusable (logged,
+        and the previous info stays). ``new_generation`` is False for the first one.
+        """
+        with self._lock:
+            previous = self._latest
+            info = parse_stream_info(payload, previous, now)
+            if info is None:
+                logger.error("Bad STREAM_INFO payload: %r", payload[:200])
+                return None
+            self._latest = info
+        return info, previous is not None and info.generation != previous.generation
+
+    def note_frame_raw(self, payload: bytes) -> None:
+        """FRAME_RAW is ignored (the engine never requests GRAY8, spec 3.2 and 7); log it once."""
+        header = parse_frame_raw(payload)
+        if header is None:
+            logger.warning("Ignoring a malformed FRAME_RAW (%d bytes)", len(payload))
+        elif not self._frame_raw_logged:
+            self._frame_raw_logged = True
+            logger.debug("Ignoring FRAME_RAW (generation %d, %dx%d); the engine does not use GRAY8",
+                         header.generation, header.width, header.height)
 
 
 # -- v2: FRAME_RAW (protocol section 11.6) ---------------------------------------
@@ -217,15 +261,18 @@ def stall_timeout_s(floor_s: float, info: StreamInfo | None) -> float:
     return max(floor_s, 2.0 * info.frame_interval_us / 1e6 + 1.0)
 
 
-def v2_stall(now: float, last_activity: float, floor_s: float, info: StreamInfo | None) -> tuple[float, float]:
-    """``(seconds without a sign of life, timeout)`` of a v2 session.
+def stall_since_last_activity(
+    now: float, last_activity: float, floor_s: float, info: StreamInfo | None
+) -> tuple[float, float]:
+    """``(seconds since the last message of any type, timeout)`` of a v2 session.
 
     Any received message counts as a sign of life, not only FRAME. While the
     latest STREAM_INFO says ``"reconfiguring"`` the stall is reported as 0 for
-    up to ``RECONFIGURE_GRACE_S`` after it arrived.
+    up to ``RECONFIGURE_GRACE_S`` after the reconfiguration began.
     """
     timeout = stall_timeout_s(floor_s, info)
-    if info is not None and info.reconfiguring and now - info.received_at <= RECONFIGURE_GRACE_S:
+    if (info is not None and info.reconfiguring and info.reconfiguring_since is not None
+            and now - info.reconfiguring_since <= RECONFIGURE_GRACE_S):
         return 0.0, timeout
     return now - last_activity, timeout
 
@@ -256,17 +303,17 @@ class GeometryTracker:
         info = source() if source is not None else None
         return info.geometry if info is not None else geometry
 
-    def expected_frame_size(self) -> tuple[int, int] | None:
-        """``(height, width)`` every frame must have, or None when it is not certain.
+    def authoritative(self) -> StreamGeometry | None:
+        """The geometry every frame must have, or None when it is not certain.
 
         Only STREAM_INFO is authoritative. A v1 server's HELLO size can be wrong
-        until the first frame corrects it, so a v1 session has no expectation
-        (and the solver thread never drops a result for its size).
+        until the first frame corrects it, so a v1 session has none (and the
+        ``FrameSizeGuard`` never drops a result there).
         """
         with self._lock:
             source = self._stream_source
         info = source() if source is not None else None
-        return (info.height, info.width) if info is not None else None
+        return info.geometry if info is not None else None
 
     @property
     def awaiting_frame(self) -> bool:
@@ -322,3 +369,40 @@ class GeometryTracker:
             self._geometry = DEFAULT_GEOMETRY
             self._awaiting_frame = False
             self._stream_source = None
+
+
+class FrameSizeGuard:
+    """Rejects solve results of frames that do not have the size the camera announced (spec 5.1).
+
+    A frame decoded just before a binning switch has the old size; its result
+    describes pixels that no longer exist. ``accepts()`` is False for it, and the
+    solver thread then skips the result without counting a failure. With no
+    authoritative geometry (a v1 session) everything is accepted. A mismatch that
+    keeps happening is logged once at ERROR: with a camera that announces one
+    size and sends another, tracking would otherwise fail without a word.
+    """
+
+    ERROR_AFTER = 5
+
+    def __init__(self, authoritative: Callable[[], StreamGeometry | None]) -> None:
+        self._authoritative = authoritative
+        self._streak = 0
+
+    def accepts(self, result: dict) -> bool:
+        try:
+            expected = self._authoritative()
+        except Exception as exc:  # noqa: BLE001 - never stop the solver over this
+            logger.error("Announced frame size unavailable: %s", exc)
+            return True
+        size = result.get("image_size")  # (height, width)
+        if expected is None or size is None or (size[1], size[0]) == (expected.width, expected.height):
+            self._streak = 0
+            return True
+        self._streak += 1
+        if self._streak == self.ERROR_AFTER:
+            logger.error("Frames are %dx%d but the camera announced %dx%d; %d results in a row dropped",
+                         size[1], size[0], expected.width, expected.height, self._streak)
+        else:
+            logger.debug("Dropping a result of a %dx%d frame (stream is %dx%d)",
+                         size[1], size[0], expected.width, expected.height)
+        return False

@@ -89,11 +89,9 @@ class CameraClient:
         self._connected = False
         # fork: camera-controls (spec 3.1, 3.2, 3.3)
         self._session_version = MIN_PROTOCOL_VERSION
-        self._stream_lock = threading.Lock()
-        self._stream_info: stream.StreamInfo | None = None
+        self._stream = stream.StreamInfoTracker()
         self._on_stream_info_cb: callable | None = None
         self._last_message_time: float = 0.0
-        self._frame_raw_logged = False
 
     # -- public API -----------------------------------------------------------
 
@@ -119,14 +117,14 @@ class CameraClient:
 
         # Validate protocol version
         cam_version = self._hello_info.get("protocol_version")
-        if cam_version != MIN_PROTOCOL_VERSION:
+        if cam_version != MIN_PROTOCOL_VERSION:  # fork: camera-controls (was PROTOCOL_VERSION)
             raise ProtocolError(
-                f"Protocol version mismatch: camera={cam_version}, expected={MIN_PROTOCOL_VERSION}"
+                f"Protocol version mismatch: camera={cam_version}, expected={MIN_PROTOCOL_VERSION}"  # fork: camera-controls
             )
         self._session_version = _negotiate_version(self._hello_info)  # fork: camera-controls
 
         # Send our HELLO response
-        our_hello = {"protocol_version": self._session_version, "app": "evf", "app_version": "0.2.1"}
+        our_hello = {"protocol_version": self._session_version, "app": "evf", "app_version": "0.2.1"}  # fork: camera-controls
         self._sock.sendall(encode_json_message(MSG_HELLO, our_hello))
         logger.debug("Sent HELLO response")
 
@@ -162,19 +160,19 @@ class CameraClient:
             self._sock = None
         logger.info("Camera client stopped")
 
-    def set_control(self, control_id: str, value: int | float) -> bool:
+    def set_control(self, control_id: str, value: int | float) -> bool:  # fork: camera-controls
         """Send a SET_CONTROL message (v2 controls can be float). True if it was sent."""
         if self._sock is None:
-            return False
+            return False  # fork: camera-controls
         msg = encode_json_message(MSG_SET_CONTROL, {"id": control_id, "value": value})
         try:
             self._sock.sendall(msg)
         except OSError as exc:
             logger.error("Failed to send SET_CONTROL: %s", exc)
-            return False
-        return True
+            return False  # fork: camera-controls
+        return True  # fork: camera-controls
 
-    def update_cached_control(self, control_id: str, value: int | float) -> None:
+    def update_cached_control(self, control_id: str, value: int | float) -> None:  # fork: camera-controls
         """Optimistically update the cached current value for a control.
 
         Avoids UI displaying stale values before the server's CONTROL_INFO
@@ -238,13 +236,7 @@ class CameraClient:
     @property
     def stream_info(self) -> "stream.StreamInfo | None":
         """The latest STREAM_INFO (v2 sessions; None in a v1 session)."""
-        with self._stream_lock:
-            return self._stream_info
-
-    @property
-    def stream_geometry(self) -> "stream.StreamGeometry | None":
-        info = self.stream_info
-        return info.geometry if info is not None else None
+        return self._stream.latest
 
     @property
     def last_activity_time(self) -> float:
@@ -311,45 +303,28 @@ class CameraClient:
             raise ProtocolError(f"Camera error during handshake: {payload.decode('utf-8', errors='replace')}")
         if msg_type != MSG_STREAM_INFO:
             raise ProtocolError(f"Expected STREAM_INFO, got {type_name(msg_type)}")
-        if self._store_stream_info(payload) is None:
+        if self._stream.update(payload, time.monotonic()) is None:
             raise ProtocolError("Bad STREAM_INFO payload in handshake")
 
     def _handle_v2_message(self, msg_type: int, payload: bytes) -> None:
-        if msg_type == MSG_STREAM_INFO:
-            stored = self._store_stream_info(payload)
-            if stored is None:
-                return
-            info, new_generation = stored
-            if new_generation:
-                # Frames of the old size must not be solved after the switch (spec 3.2).
-                self._frame_buffer.clear()
-            logger.info("STREAM_INFO: %s %dx%d binning %d, generation %d, interval %s us",
-                        info.state, info.width, info.height, info.binning, info.generation,
-                        info.frame_interval_us)
-            if self._on_stream_info_cb:
-                try:
-                    self._on_stream_info_cb(info, new_generation)
-                except Exception as exc:  # noqa: BLE001 - a callback must not end the receiver
-                    logger.error("on_stream_info callback failed: %s", exc)
-        else:  # FRAME_RAW: parsed and ignored, the engine never requests GRAY8 yet (spec 3.2, 7)
-            header = stream.parse_frame_raw(payload)
-            if header is None:
-                logger.warning("Ignoring a malformed FRAME_RAW (%d bytes)", len(payload))
-            elif not self._frame_raw_logged:
-                self._frame_raw_logged = True
-                logger.debug("Ignoring FRAME_RAW (generation %d, %dx%d); the engine does not use GRAY8",
-                             header.generation, header.width, header.height)
-
-    def _store_stream_info(self, payload: bytes):
-        """Parse and keep a STREAM_INFO. Returns ``(info, new_generation)`` or None if unusable."""
-        with self._stream_lock:
-            previous = self._stream_info
-            info = stream.parse_stream_info(payload, previous, time.monotonic())
-            if info is None:
-                logger.error("Bad STREAM_INFO payload: %r", payload[:200])
-                return None
-            self._stream_info = info
-        return info, previous is not None and info.generation != previous.generation
+        if msg_type == MSG_FRAME_RAW:
+            self._stream.note_frame_raw(payload)
+            return
+        updated = self._stream.update(payload, time.monotonic())
+        if updated is None:
+            return
+        info, new_generation = updated
+        if new_generation:
+            # Frames of the old size must not be solved after the switch (spec 3.2).
+            self._frame_buffer.clear()
+        logger.info("STREAM_INFO: %s %dx%d binning %d, generation %d, interval %s us",
+                    info.state, info.width, info.height, info.binning, info.generation,
+                    info.frame_interval_us)
+        if self._on_stream_info_cb:
+            try:
+                self._on_stream_info_cb(info, new_generation)
+            except Exception as exc:  # noqa: BLE001 - a callback must not end the receiver
+                logger.error("on_stream_info callback failed: %s", exc)
 
 
 def _negotiate_version(hello: dict) -> int:

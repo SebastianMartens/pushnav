@@ -31,7 +31,7 @@ from pathlib import Path
 from evf.camera import server_select  # fork: camera-server-dotnet (see specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md section 8)
 from evf.camera.client import CameraClient
 from evf.camera.controls import restore_controls  # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
-from evf.camera.stream import v2_stall  # fork: camera-controls
+from evf.camera.stream import stall_since_last_activity  # fork: camera-controls
 from evf.config.manager import ConfigManager
 from evf.engine.frame_buffer import LatestFrame
 from evf.engine.state import EngineState, StateMachine
@@ -315,11 +315,8 @@ class SubprocessManager:
             # Detect frame stall (socket open but no frames arriving)
             if client.last_frame_time > 0:
                 stall, timeout = self._fork_stall(client)  # fork: camera-controls
-                if stall > timeout:
-                    logger.warning(
-                        "No frames for %.1fs (limit %.1fs) — treating as stall, starting recovery",
-                        stall, timeout,
-                    )
+                if stall > timeout:  # fork: camera-controls
+                    self._fork_log_stall(client, stall, timeout)  # fork: camera-controls (the upstream warning, v1 text unchanged)
                     self._start_recovery()
                     return
 
@@ -438,7 +435,22 @@ class SubprocessManager:
         now = time.monotonic()
         if client.session_version < 2:
             return now - client.last_frame_time, self._FRAME_STALL_TIMEOUT
-        return v2_stall(now, client.last_activity_time, self._FRAME_STALL_TIMEOUT, client.stream_info)
+        return stall_since_last_activity(
+            now, client.last_activity_time, self._FRAME_STALL_TIMEOUT, client.stream_info)
+
+    @staticmethod
+    def _fork_log_stall(client: CameraClient, stall: float, timeout: float) -> None:
+        """fork: camera-controls. A v1 session logs what it always did; v2 counts any message."""
+        if client.session_version < 2:
+            logger.warning(
+                "No frames for %.1fs — treating as stall, starting recovery",
+                stall,
+            )
+        else:
+            logger.warning(
+                "No message from the camera for %.1fs (limit %.1fs) — treating as stall, starting recovery",
+                stall, timeout,
+            )
 
     def _fork_recovered(self, hello: dict) -> None:
         """fork: camera-controls. Tell the engine which camera answered after a recovery."""

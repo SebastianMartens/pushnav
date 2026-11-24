@@ -116,7 +116,7 @@ class TestNegotiation:
             client.connect(timeout=5.0)
             assert client.session_version == 1
             assert v1_mock.client_hello_log[-1]["protocol_version"] == 1
-            assert client.stream_info is None and client.stream_geometry is None
+            assert client.stream_info is None
         finally:
             client.stop()
 
@@ -194,7 +194,7 @@ class TestNegotiation:
 class TestStreamInfoParsing:
     def test_a_complete_message(self):
         info = stream.parse_stream_info(_stream_info_payload(), None, now=12.0)
-        assert info == stream.StreamInfo(1, "streaming", 640, 360, 2, "JPEG", 100000, 10000, 12.0)
+        assert info == stream.StreamInfo(1, "streaming", 640, 360, 2, "JPEG", 100000, 10000, None)
         assert info.geometry == stream.StreamGeometry(640, 360, 2, 1)
         assert not info.reconfiguring
 
@@ -208,9 +208,9 @@ class TestStreamInfoParsing:
     def test_a_repeated_reconfiguring_message_keeps_its_start_time(self):
         first = stream.parse_stream_info(_stream_info_payload(state="reconfiguring"), None, now=1.0)
         again = stream.parse_stream_info(_stream_info_payload(state="reconfiguring"), first, now=4.0)
-        assert again.received_at == 1.0
+        assert again.reconfiguring_since == 1.0
         other_generation = stream.parse_stream_info(_stream_info_payload(2, "reconfiguring"), first, now=4.0)
-        assert other_generation.received_at == 4.0
+        assert other_generation.reconfiguring_since == 4.0
 
     @pytest.mark.parametrize("payload", [
         b"", b"not json", b"[1]", b"{}", json.dumps({"generation": 1}).encode(),
@@ -258,7 +258,7 @@ class TestStreamInfoHandling:
             client.connect(timeout=5.0)
             info = client.stream_info
             assert (info.generation, info.state, info.width, info.height) == (1, "streaming", 1280, 720)
-            assert client.stream_geometry == stream.StreamGeometry(1280, 720, 1, 1)
+            assert client.stream_info.geometry == stream.StreamGeometry(1280, 720, 1, 1)
         finally:
             client.stop()
 
@@ -275,7 +275,7 @@ class TestStreamInfoHandling:
         assert _wait(lambda: buffer.get()[0] is not None)
         jpeg, _, _ = buffer.get()
         assert Image.open(io.BytesIO(jpeg)).size == (640, 360)
-        assert client.stream_geometry == stream.StreamGeometry(640, 360, 2, 2)
+        assert client.stream_info.geometry == stream.StreamGeometry(640, 360, 2, 2)
 
     def test_the_buffer_is_empty_between_the_new_generation_and_its_first_frame(self):
         buffer = LatestFrame()
@@ -572,7 +572,7 @@ class TestV1Regression:
     def test_the_geometry_is_still_hello_corrected_by_the_first_frame(self, engine_on_v1):
         eng, _mgr, _server = engine_on_v1
         profile = eng._camera_profile
-        assert profile.expected_frame_size() is None
+        assert profile.geometry.authoritative() is None
         assert _wait(lambda: eng.frame_buffer.get()[0] is not None)
         payload = profile.geometry_payload()  # reads the first frame
         assert (payload["image_w"], payload["image_h"]) == (1280, 720)
@@ -587,3 +587,48 @@ class TestV1Regression:
             assert client.stream_info is None and client.session_version == 1
         finally:
             client.stop()
+
+
+# -- the tracker the client keeps its STREAM_INFO in ---------------------------------------
+
+
+class TestStreamInfoTracker:
+    def test_the_first_message_is_not_a_new_generation(self):
+        tracker = stream.StreamInfoTracker()
+        assert tracker.latest is None
+        info, new_generation = tracker.update(_stream_info_payload(1), now=1.0)
+        assert new_generation is False and tracker.latest == info
+
+    def test_a_changed_generation_is_flagged_a_changed_state_is_not(self):
+        tracker = stream.StreamInfoTracker()
+        tracker.update(_stream_info_payload(1), now=1.0)
+        _, new_generation = tracker.update(_stream_info_payload(1, "reconfiguring"), now=2.0)
+        assert new_generation is False
+        info, new_generation = tracker.update(_stream_info_payload(2), now=3.0)
+        assert new_generation is True and info.generation == 2
+
+    def test_an_unusable_message_returns_none_and_keeps_the_previous_info(self, caplog):
+        tracker = stream.StreamInfoTracker()
+        first, _ = tracker.update(_stream_info_payload(1), now=1.0)
+        assert tracker.update(b"{nope", now=2.0) is None
+        assert tracker.latest == first
+        assert "Bad STREAM_INFO payload" in caplog.text
+
+    def test_the_reconfiguration_start_is_kept_across_repeats_and_cleared_after(self):
+        tracker = stream.StreamInfoTracker()
+        tracker.update(_stream_info_payload(1), now=1.0)
+        info, _ = tracker.update(_stream_info_payload(1, "reconfiguring"), now=2.0)
+        assert info.reconfiguring_since == 2.0
+        info, _ = tracker.update(_stream_info_payload(1, "reconfiguring"), now=3.0)
+        assert info.reconfiguring_since == 2.0
+        info, _ = tracker.update(_stream_info_payload(2), now=4.0)
+        assert info.reconfiguring_since is None and not info.reconfiguring
+
+    def test_frame_raw_is_logged_once_and_a_malformed_one_is_warned_about(self, caplog):
+        tracker = stream.StreamInfoTracker()
+        with caplog.at_level("DEBUG", logger="evf.camera.stream"):
+            tracker.note_frame_raw(_raw_frame())
+            tracker.note_frame_raw(_raw_frame())
+            tracker.note_frame_raw(b"short")
+        assert caplog.text.count("Ignoring FRAME_RAW") == 1
+        assert "malformed FRAME_RAW" in caplog.text

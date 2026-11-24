@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from evf.camera.stream import StreamGeometry
+from evf.camera.stream import FrameSizeGuard, StreamGeometry
 from evf.config.manager import ConfigManager
 from evf.engine.engine import Engine
 from evf.engine.frame_buffer import LatestFrame
@@ -24,6 +24,7 @@ from tests.test_subprocess_mgr import _NoopSubprocessManager
 
 OLD_SIZE = (720, 1280)  # (height, width) as in a solve result
 NEW_SIZE = (360, 640)
+NEW_GEOMETRY = StreamGeometry(640, 360, 2, 2)  # what STREAM_INFO announced
 
 
 class _SizedSolver:
@@ -45,12 +46,12 @@ class _SizedSolver:
                 "image_size": size}
 
 
-def _thread(tmp_path, expected, audio=None):
+def _thread(tmp_path, announced, audio=None):
     fb, pointing, sm = LatestFrame(), PointingState(), StateMachine()
     sm.transition(EngineState.SYNC)
     sm.transition(EngineState.SYNC_CONFIRM)
     thread = SolverThread(_SizedSolver(), fb, pointing, sm, ConfigManager(config_dir=tmp_path),
-                          audio=audio, expected_frame_size=expected)
+                          audio=audio, frame_size_guard=FrameSizeGuard(announced) if announced else None)
     return thread, fb, pointing, sm
 
 
@@ -63,7 +64,7 @@ def _feed(fb, payload, first_id, count=3):
 class TestSolverThreadDropsMismatchedResults:
     def test_a_result_of_the_old_size_is_dropped_without_a_failure(self, tmp_path):
         audio = MagicMock()
-        thread, fb, pointing, sm = _thread(tmp_path, lambda: NEW_SIZE, audio)
+        thread, fb, pointing, sm = _thread(tmp_path, lambda: NEW_GEOMETRY, audio)
         thread.start()
         try:
             _feed(fb, b"old", 1)
@@ -77,7 +78,7 @@ class TestSolverThreadDropsMismatchedResults:
             thread.stop()
 
     def test_after_the_switch_frames_of_the_new_size_are_solved(self, tmp_path):
-        thread, fb, pointing, sm = _thread(tmp_path, lambda: NEW_SIZE)
+        thread, fb, pointing, sm = _thread(tmp_path, lambda: NEW_GEOMETRY)
         thread.start()
         try:
             _feed(fb, b"old", 1)
@@ -90,7 +91,7 @@ class TestSolverThreadDropsMismatchedResults:
 
     def test_a_dropped_result_is_not_a_failure_even_after_many_of_them(self, tmp_path):
         audio = MagicMock()
-        thread, fb, _pointing, _sm = _thread(tmp_path, lambda: NEW_SIZE, audio)
+        thread, fb, _pointing, _sm = _thread(tmp_path, lambda: NEW_GEOMETRY, audio)
         thread.start()
         try:
             _feed(fb, b"old", 1, count=10)
@@ -118,7 +119,7 @@ class TestSolverThreadDropsMismatchedResults:
         finally:
             thread.stop()
 
-    def test_a_failing_size_callback_does_not_stop_the_solver(self, tmp_path):
+    def test_a_failing_geometry_source_does_not_stop_the_solver(self, tmp_path):
         def boom():
             raise RuntimeError("boom")
 
@@ -130,15 +131,52 @@ class TestSolverThreadDropsMismatchedResults:
         finally:
             thread.stop()
 
-    def test_a_persistent_mismatch_is_warned_about_once(self, tmp_path, caplog):
-        thread, fb, _pointing, _sm = _thread(tmp_path, lambda: NEW_SIZE)
-        with caplog.at_level("WARNING", logger="evf.solver.thread"):
+
+class TestFrameSizeGuard:
+    def test_a_result_of_the_announced_size_is_accepted(self):
+        guard = FrameSizeGuard(lambda: NEW_GEOMETRY)
+        assert guard.accepts({"image_size": NEW_SIZE}) is True
+
+    def test_a_result_of_another_size_is_rejected(self):
+        guard = FrameSizeGuard(lambda: NEW_GEOMETRY)
+        assert guard.accepts({"image_size": OLD_SIZE}) is False
+
+    def test_without_an_announced_geometry_everything_is_accepted(self):
+        guard = FrameSizeGuard(lambda: None)
+        assert guard.accepts({"image_size": OLD_SIZE}) is True
+        assert guard.accepts({}) is True
+
+    def test_a_result_without_a_size_is_accepted(self):
+        assert FrameSizeGuard(lambda: NEW_GEOMETRY).accepts({"RA": 1.0}) is True
+
+    def test_a_persistent_mismatch_is_logged_once_at_error(self, caplog):
+        guard = FrameSizeGuard(lambda: NEW_GEOMETRY)
+        with caplog.at_level("DEBUG", logger="evf.camera.stream"):
             for _ in range(12):
-                assert thread._size_mismatch({"image_size": OLD_SIZE}) is True
-            assert thread._size_mismatch({"image_size": NEW_SIZE}) is False
+                assert guard.accepts({"image_size": OLD_SIZE}) is False
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1 and "5 results in a row dropped" in errors[0].getMessage()
+        assert "1280x720" in errors[0].getMessage() and "640x360" in errors[0].getMessage()
+
+    def test_a_few_dropped_results_around_a_switch_are_not_an_error(self, caplog):
+        guard = FrameSizeGuard(lambda: NEW_GEOMETRY)
+        with caplog.at_level("DEBUG", logger="evf.camera.stream"):
+            for _ in range(4):
+                guard.accepts({"image_size": OLD_SIZE})
+            guard.accepts({"image_size": NEW_SIZE})
+            for _ in range(4):
+                guard.accepts({"image_size": OLD_SIZE})
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+    def test_each_streak_reports_again(self, caplog):
+        guard = FrameSizeGuard(lambda: NEW_GEOMETRY)
+        with caplog.at_level("ERROR", logger="evf.camera.stream"):
             for _ in range(5):
-                thread._size_mismatch({"image_size": OLD_SIZE})
-        assert caplog.text.count("dropping their results") == 2  # once per streak of five
+                guard.accepts({"image_size": OLD_SIZE})
+            guard.accepts({"image_size": NEW_SIZE})
+            for _ in range(5):
+                guard.accepts({"image_size": OLD_SIZE})
+        assert len([r for r in caplog.records if r.levelname == "ERROR"]) == 2
 
 
 class TestEngineFollowsStreamInfo:
@@ -160,7 +198,7 @@ class TestEngineFollowsStreamInfo:
         eng, mgr, _server = session
         profile = eng._camera_profile
         assert profile.geometry.get() == StreamGeometry(1280, 720, 1, 1)
-        assert profile.expected_frame_size() == (720, 1280)
+        assert profile.geometry.authoritative() == StreamGeometry(1280, 720, 1, 1)
         assert profile.geometry.awaiting_frame is False  # no "first frame corrects HELLO" in v2
 
     def test_binning_changes_the_geometry_the_web_server_reports(self, session):
@@ -169,7 +207,7 @@ class TestEngineFollowsStreamInfo:
         assert wait_for(lambda: eng._camera_profile.geometry.get().generation == 2)
         payload = eng._camera_profile.geometry_payload()
         assert (payload["image_w"], payload["image_h"]) == (640, 360)
-        assert eng._camera_profile.expected_frame_size() == (360, 640)
+        assert eng._camera_profile.geometry.authoritative() == NEW_GEOMETRY
 
     def test_a_new_generation_clears_the_centroids_but_not_the_pointing(self, session):
         eng, mgr, _server = session
@@ -199,7 +237,7 @@ class TestEngineFollowsStreamInfo:
         try:
             eng._fork_camera_connected(mgr.start())
             profile = eng._camera_profile
-            assert profile.expected_frame_size() is None
+            assert profile.geometry.authoritative() is None
             assert profile.geometry.get() == StreamGeometry(1280, 720)
             assert profile.geometry.awaiting_frame is True  # still corrected by the first decoded frame
         finally:
@@ -209,7 +247,7 @@ class TestEngineFollowsStreamInfo:
     def test_losing_the_camera_forgets_the_stream(self, session):
         eng, _mgr, _server = session
         eng._camera_profile.on_camera_gone()
-        assert eng._camera_profile.expected_frame_size() is None
+        assert eng._camera_profile.geometry.authoritative() is None
         assert eng._camera_profile.geometry.get() == StreamGeometry(1280, 720)
 
     def test_recovery_re_registers_the_stream_callback_on_the_new_client(self, tmp_path):

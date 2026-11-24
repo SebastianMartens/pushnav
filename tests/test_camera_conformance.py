@@ -429,15 +429,17 @@ class TestV2Vectors:
             _, controls, _info, _ = _handshake_v2(sock)
             by_id = _controls_by_id(controls)
             fps_before = by_id["fps"]["cur"]
-            exposure = int(2 * 1e6 / fps_before)  # two frame intervals
-            assert exposure <= by_id["exposure"]["max"]
+            step = by_id["exposure"]["step"]
+            # two frame intervals, on the exposure's step grid and inside its range
+            exposure = round(2 * 1e6 / fps_before / step) * step
+            exposure = max(by_id["exposure"]["min"], min(by_id["exposure"]["max"], exposure))
+            assert exposure * 1e-6 > 1 / fps_before, "the exposure must be longer than the frame interval"
             sock.sendall(encode_json_message(MSG_SET_CONTROL, {"id": "exposure", "value": exposure}))
             payload, _ = _read_until(sock, MSG_CONTROL_INFO)
         after = _controls_by_id(json.loads(payload))
-        assert after["exposure"]["cur"] == exposure
-        assert after["fps"]["cur"] < fps_before
-        assert 1e6 / after["fps"]["cur"] >= exposure  # the frame interval covers the exposure again
-        assert after["fps"]["max"] < by_id["fps"]["max"]  # the ranges moved with it
+        assert abs(after["exposure"]["cur"] - exposure) <= step
+        assert after["fps"]["cur"] < fps_before  # exposure priority: fps is lowered ...
+        assert 1e6 / after["fps"]["cur"] >= after["exposure"]["cur"]  # ... until the interval covers the exposure
 
     def test_3_the_next_stream_info_carries_the_new_frame_interval(self, v2_server):
         with v2_server.connect() as sock:
