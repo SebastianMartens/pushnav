@@ -56,6 +56,7 @@ class SolverThread:
         audio: AudioAlert | None = None,
         solver_params: SolverParamsHolder | None = None,  # fork: camera-controls
         fov_tracker=None,  # fork: camera-controls: engine.camera_profile.CameraProfile (FOV learning, search)
+        expected_frame_size=None,  # fork: camera-controls: () -> (height, width) | None (spec 5.1)
     ) -> None:
         self._solver = solver
         self._frame_buffer = frame_buffer
@@ -67,6 +68,8 @@ class SolverThread:
         # The engine's holder; a standalone thread solves the legacy 8.86 deg / 1.5 deg.
         self._solver_params = solver_params if solver_params is not None else SolverParamsHolder()
         self._fov_tracker = fov_tracker
+        self._expected_frame_size = expected_frame_size
+        self._size_mismatch_streak = 0
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._consecutive_failures = 0
@@ -230,6 +233,32 @@ class SolverThread:
         if self._fov_tracker is not None:
             self._fov_tracker.solve_failed()
 
+    # fork: camera-controls (spec 5.1): a frame decoded just before a binning switch has the
+    # old size. Its result describes pixels that no longer exist, and it is no failure either.
+    _SIZE_MISMATCH_WARN_AFTER = 5
+
+    def _size_mismatch(self, result: dict) -> bool:
+        """True if ``result`` was solved on a frame of another size than the stream now has."""
+        if self._expected_frame_size is None:
+            return False
+        try:
+            expected = self._expected_frame_size()
+        except Exception as exc:  # noqa: BLE001 - never stop the solver over this
+            logger.error("Expected frame size unavailable: %s", exc)
+            return False
+        size = result.get("image_size")
+        if expected is None or size is None or tuple(size) == tuple(expected):
+            self._size_mismatch_streak = 0
+            return False
+        self._size_mismatch_streak += 1
+        if self._size_mismatch_streak == self._SIZE_MISMATCH_WARN_AFTER:
+            logger.warning("Frames are %dx%d but the camera announced %dx%d; dropping their results",
+                           size[1], size[0], expected[1], expected[0])
+        else:
+            logger.debug("Dropping a result of a %dx%d frame (stream is %dx%d)",
+                         size[1], size[0], expected[1], expected[0])
+        return True
+
     def _run(self) -> None:
         last_frame_id = -1
         first_success = True
@@ -283,6 +312,9 @@ class SolverThread:
                 if self._audio and new_count == self._AUDIO_FAIL_THRESHOLD:
                     self._audio.on_failure_count_changed(new_count)
                 continue
+
+            if self._size_mismatch(result):  # fork: camera-controls
+                continue  # not counted as a failure: no lost sound, no FOV-learning reset
 
             if self._solver.is_valid(
                 result,

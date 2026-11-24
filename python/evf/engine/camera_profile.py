@@ -112,6 +112,13 @@ class CameraProfile:
     def geometry(self) -> GeometryTracker:
         return self._geometry
 
+    def expected_frame_size(self) -> tuple[int, int] | None:
+        """``(height, width)`` of the frames the camera announced (v2 session), None in a v1 session.
+
+        The solver thread drops a result whose frame has another size (spec 5.1).
+        """
+        return self._geometry.expected_frame_size()
+
     @property
     def active_key(self) -> str | None:
         """Profile key of the connected camera (None: none connected, or unidentifiable)."""
@@ -143,10 +150,15 @@ class CameraProfile:
 
     # -- camera connect --------------------------------------------------------
 
-    def on_camera_connected(self, hello: dict) -> None:
-        """A camera answered HELLO: activate its profile, FOV and geometry."""
+    def on_camera_connected(self, hello: dict, client=None) -> None:
+        """A camera answered HELLO: activate its profile, FOV and geometry.
+
+        ``client`` (the connected ``CameraClient``) matters in a v2 session only: its
+        STREAM_INFO is the geometry (spec 5.1). A v1 session takes HELLO's size.
+        """
         with self._lock:
-            self._geometry.connect(hello)
+            v2 = client is not None and client.session_version >= 2
+            self._geometry.connect(hello, (lambda: client.stream_info) if v2 else None)
             key = profiles.camera_key_from_hello(hello)
             self._active_key = key
             self._hello = dict(hello) if isinstance(hello, dict) else None

@@ -43,6 +43,7 @@ from evf.engine.status_led import StatusLedController, find_leds
 from evf.solver.solver import PlateSolver
 # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
 from evf.engine.camera_profile import CameraProfile
+from evf.camera.controls import remember_control, restore_controls
 import numpy as np
 
 from evf.solver.sync import (
@@ -589,6 +590,7 @@ class Engine:
         On first launch (config has no saved exposure/gain), each control is
         initialized to the midpoint of the range the camera reports — which
         differs by OS/camera backend, so we can't hardcode sensible defaults.
+        (fork: evf.camera.controls.restore_controls does this, per camera profile.)
 
         With no USB video device attached (Linux), skips spawning
         camera_server — it would only fail and log its allowlist.
@@ -608,27 +610,7 @@ class Engine:
 
             client = self._subprocess_mgr.client
             if client:
-                for ctrl in client.controls:
-                    cid = ctrl.get("id")
-                    if cid not in ("exposure", "gain"):
-                        continue
-                    saved = self._config.exposure if cid == "exposure" else self._config.gain
-                    if saved is None:
-                        cmin = ctrl.get("min", 0)
-                        cmax = ctrl.get("max", 0)
-                        value = (cmin + cmax) // 2
-                        logger.info(
-                            "First-run %s = %d (midpoint of [%d, %d])",
-                            cid, value, cmin, cmax,
-                        )
-                        if cid == "exposure":
-                            self._config.exposure = value
-                        else:
-                            self._config.gain = value
-                    else:
-                        value = saved
-                    client.set_control(cid, value)
-                    client.update_cached_control(cid, value)
+                restore_controls(client, self._config)  # fork: camera-controls (spec 3.4, 4.2)
         except Exception as exc:
             logger.error("Failed to start camera: %s", exc)
             self._subprocess_mgr = None
@@ -764,6 +746,7 @@ class Engine:
                 audio=self._audio,
                 solver_params=self._camera_profile.params,  # fork: camera-controls
                 fov_tracker=self._camera_profile,  # fork: camera-controls (FOV learning, search)
+                expected_frame_size=self._camera_profile.expected_frame_size,  # fork: camera-controls
             )
             # Wire solver failure count into web server for audio event detection
             if self._webserver is not None:
@@ -947,16 +930,12 @@ class Engine:
 
     # -- camera control (§8.4) ------------------------------------------------
 
-    def set_control(self, control_id: str, value: int) -> None:
+    def set_control(self, control_id: str, value: int | float) -> None:
         """Send a camera control change and persist to config."""
         client = self._subprocess_mgr.client if self._subprocess_mgr else None
-        if client:
-            client.set_control(control_id, value)
-        # Persist to config
-        if control_id == "exposure":
-            self._config.exposure = value
-        elif control_id == "gain":
-            self._config.gain = value
+        sent = client.set_control(control_id, value) if client else False
+        # Persist to config: the camera profile, and in a v1 session the legacy keys too
+        remember_control(self._config, client, control_id, value, sent)  # fork: camera-controls (spec 4.2)
 
     # -- shutdown (§8.5) ------------------------------------------------------
 
@@ -1040,10 +1019,25 @@ class Engine:
         legacy FOV and geometry (today's behaviour).
         """
         try:
-            self._camera_profile.on_camera_connected(hello)
+            client = self._subprocess_mgr.client if self._subprocess_mgr else None
+            self._camera_profile.on_camera_connected(hello, client)
+            self._fork_watch_stream(client)
             self._fork_apply_database()
         except Exception as exc:
             logger.error("Could not activate the camera profile: %s", exc)
+
+    def _fork_watch_stream(self, client) -> None:
+        """fork: camera-controls (spec 5.1). A v2 session tells us when the frame size changes."""
+        if client is not None and client.session_version >= 2:
+            client.on_stream_info(self._fork_stream_info)
+
+    def _fork_stream_info(self, _info, new_generation: bool) -> None:
+        """A new stream generation (binning change): the centroids of the old size are meaningless.
+
+        RA/Dec pointing stays valid, it does not depend on the pixel size.
+        """
+        if new_generation:
+            self._pointing_state.clear_centroids()
 
     def _fork_apply_database(self) -> None:
         """fork: camera-controls. Load the database a FOV change asked for, if no solver thread will.

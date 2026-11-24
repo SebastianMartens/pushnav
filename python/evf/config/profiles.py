@@ -4,9 +4,9 @@
 """Per-camera profiles in ``config.json`` (``camera.profiles``).
 
 A profile belongs to one camera model and carries what depends on camera and
-lens: the saved control values (later slices) and the horizontal FOV. Slice S1
-only needs the key rule, ``fov_h_deg`` / ``fov_source`` and
-``camera.last_camera_key``.
+lens: the saved control values (``controls``: ``{"value": v, "unit": u}`` per
+control id, spec 4.2) and the horizontal FOV (``fov_h_deg`` / ``fov_source``).
+``camera.last_camera_key`` names the last connected camera.
 
 Profile key (spec 4.2): HELLO ``camera_key`` when the camera server sends it,
 in v1 and v2 sessions alike; else ``"<backend>:<camera_model>"`` from HELLO.
@@ -100,6 +100,39 @@ def set_fov(config: ConfigManager, key: str, fov_h_deg: float | None, source: st
     profile = ensure_profile(config, key)
     profile["fov_h_deg"] = fov_h_deg
     profile["fov_source"] = source if fov_h_deg is not None else None
+    profiles = copy.deepcopy(_profiles(config))
+    profiles[key] = profile
+    config.set(_SECTION, "profiles", profiles)
+
+
+def get_saved_control(config: ConfigManager, key: str, control_id: str) -> dict[str, Any] | None:
+    """The saved ``{"value": ..., "unit": ...}`` of a control (a copy), None if there is none.
+
+    ``unit`` is absent for controls without one (binning). An entry that is not
+    an object with a ``value`` (a hand-edited file) counts as not saved.
+    """
+    profile = _profiles(config).get(key)
+    controls = profile.get("controls") if isinstance(profile, dict) else None
+    entry = controls.get(control_id) if isinstance(controls, dict) else None
+    if not isinstance(entry, dict) or "value" not in entry:
+        return None
+    return dict(entry)
+
+
+def save_control(
+    config: ConfigManager, key: str, control_id: str, value: Any, unit: str | None = None
+) -> None:
+    """Save a control value in the profile (spec 4.2): ``{"value": v, "unit": u}``, no ``unit`` if None.
+
+    Creates the profile if needed and writes the file only when the entry changes.
+    """
+    profile = ensure_profile(config, key)
+    entry: dict[str, Any] = {"value": value}
+    if unit is not None:
+        entry["unit"] = unit
+    if profile["controls"].get(control_id) == entry:
+        return
+    profile["controls"][control_id] = entry
     profiles = copy.deepcopy(_profiles(config))
     profiles[key] = profile
     config.set(_SECTION, "profiles", profiles)
