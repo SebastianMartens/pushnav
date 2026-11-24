@@ -91,6 +91,12 @@ class MockCameraServer:
         fps: Frame rate for streaming.
         hello: Override HELLO payload dict.
         sample_dir: Directory containing sample PNG/JPEG files.
+        v2: fork (camera-controls): speak protocol v2 (tests/mock_camera_v2.py): IDS-like
+            controls with coupling, STREAM_INFO, binning, GRAY8. A client that answers
+            ``protocol_version: 1`` still gets a v1 session. Off by default: the v1
+            behaviour below is unchanged.
+        v2_options: ``exposure_us`` (initial), ``frame_size`` ((w, h) the samples are
+            resized to), ``reconfigure_s`` (how long "reconfiguring" lasts).
     """
 
     def __init__(
@@ -100,11 +106,15 @@ class MockCameraServer:
         fps: float = 10.0,
         hello: dict | None = None,
         sample_dir: Path | None = None,
+        v2: bool = False,  # fork: camera-controls
+        v2_options: dict | None = None,  # fork: camera-controls
     ) -> None:
         self._host = host
         self._port = port
         self._fps = fps
-        self._hello = hello or dict(_DEFAULT_HELLO)
+        self._v2 = v2  # fork: camera-controls
+        self._v2_options = dict(v2_options or {})  # fork: camera-controls
+        self._hello = hello or _initial_hello(v2)
         self._controls = _deep_copy(_DEFAULT_CONTROLS)
         self._sample_dir = sample_dir or _SAMPLES_DIR
         self._server_sock: socket.socket | None = None
@@ -112,6 +122,10 @@ class MockCameraServer:
         self._stop_event = threading.Event()
         self._frames: list[bytes] = []
         self._set_control_log: list[dict] = []
+        # fork: camera-controls: what the client sent, for tests
+        self._client_hello_log: list[dict] = []
+        self._stream_info_log: list[dict] = []
+        self._stream_config_log: list[dict] = []
 
     def start(self) -> None:
         self._load_frames()
@@ -147,6 +161,40 @@ class MockCameraServer:
     @property
     def set_control_log(self) -> list[dict]:
         return list(self._set_control_log)
+
+    # fork: camera-controls ---------------------------------------------------
+
+    @property
+    def client_hello_log(self) -> list[dict]:
+        """Every client HELLO received, oldest first."""
+        return list(self._client_hello_log)
+
+    @property
+    def stream_info_log(self) -> list[dict]:
+        """Every STREAM_INFO sent (v2 mode), oldest first."""
+        return list(self._stream_info_log)
+
+    @property
+    def stream_config_log(self) -> list[dict]:
+        """Every SET_STREAM_CONFIG received (v2 mode)."""
+        return list(self._stream_config_log)
+
+    @property
+    def hello(self) -> dict:
+        return self._hello
+
+    @property
+    def stopping(self) -> bool:
+        return self._stop_event.is_set()
+
+    def record_set_control(self, cmd: dict) -> None:
+        self._set_control_log.append(cmd)
+
+    def record_stream_info(self, info: dict) -> None:
+        self._stream_info_log.append(dict(info))
+
+    def record_stream_config(self, cmd: dict) -> None:
+        self._stream_config_log.append(cmd)
 
     # -- internal -------------------------------------------------------------
 
@@ -187,6 +235,11 @@ class MockCameraServer:
                 client.close()
                 return
             logger.debug("Client HELLO: %s", payload.decode("utf-8", errors="replace"))
+            client_hello = _parse_json_object(payload)  # fork: camera-controls
+            self._client_hello_log.append(client_hello)
+            if self._v2:
+                self._run_v2_session(client, client_hello)
+                return
 
             # Send CONTROL_INFO
             client.sendall(encode_json_message(MSG_CONTROL_INFO, self._controls))
@@ -200,6 +253,15 @@ class MockCameraServer:
                 client.close()
             except OSError:
                 pass
+
+    def _run_v2_session(self, client: socket.socket, client_hello: dict) -> None:
+        """fork: camera-controls. Protocol v2 (or the v1 view of it); see tests/mock_camera_v2.py."""
+        from tests.mock_camera_v2 import FrameSource, V2Camera, V2Session
+
+        options = self._v2_options
+        camera = V2Camera(self._fps, options.get("exposure_us", 10_000))
+        frames = FrameSource(self._sample_dir, options.get("frame_size"))
+        V2Session(self, client, camera, frames, options.get("reconfigure_s", 0.05)).run(client_hello)
 
     def _stream_loop(self, client: socket.socket) -> None:
         frame_idx = 0
@@ -260,6 +322,22 @@ class MockCameraServer:
 def _deep_copy(d):
     import copy
     return copy.deepcopy(d)
+
+
+def _initial_hello(v2: bool) -> dict:
+    """fork: camera-controls. The HELLO of a v1 mock, or of a v2-capable one."""
+    if v2:
+        from tests.mock_camera_v2 import V2_HELLO
+        return _deep_copy(V2_HELLO)
+    return dict(_DEFAULT_HELLO)
+
+
+def _parse_json_object(payload: bytes) -> dict:
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 # -- standalone entry point --------------------------------------------------

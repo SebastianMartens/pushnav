@@ -2,7 +2,8 @@
 # This file is part of PushNav (fork additions; see
 # specs/camera-server/SPEC_CAMERA_SERVER_WINDOWS.md section 9.2).
 
-"""Camera protocol conformance suite (v1 vectors of SPEC_PROTOCOL_CAMERA.md section 8).
+"""Camera protocol conformance suite (v1 vectors of SPEC_PROTOCOL_CAMERA.md section 8,
+v2 vectors of section 11.8).
 
 The same tests run against every camera server we can start:
 
@@ -11,6 +12,11 @@ The same tests run against every camera server we can start:
   ``--backend fake``, only when ``PUSHNAV_CONFORMANCE_SERVER=<path to the exe>`` is
   set. Without it that parametrization does not exist (nothing is skipped, so
   Linux/macOS runs stay green and quiet).
+
+The v2 vectors (``TestV2Vectors``) run against the Python mock in v2 mode
+(``MockCameraServer(v2=True)``). The C# exe joins them when it speaks v2
+(``SPEC_CAMERA_CONTROLS.md`` slice S5); until then it is a v1 server and the
+v1 vectors above are all it has to pass.
 
 Tests in ``TestCSharpServerBehavior`` cover things only the C# server promises (exit
 after disconnect, ERROR on a version mismatch, real stream size in HELLO, undrained
@@ -54,9 +60,12 @@ from evf.camera.protocol import (
     MSG_CONTROL_INFO,
     MSG_ERROR,
     MSG_FRAME,
+    MSG_FRAME_RAW,
     MSG_GET_CONTROLS,
     MSG_HELLO,
     MSG_SET_CONTROL,
+    MSG_SET_STREAM_CONFIG,
+    MSG_STREAM_INFO,
     DisconnectError,
     encode_json_message,
     encode_message,
@@ -174,6 +183,17 @@ def server(request):
             yield handle
         finally:
             _stop_exe(handle)
+
+
+@pytest.fixture(params=["mock"])  # slice S5 adds the C# exe here
+def v2_server(request):
+    """A server that offers protocol v2."""
+    mock = MockCameraServer(port=0, fps=20, v2=True)
+    mock.start()
+    try:
+        yield ServerHandle("mock", mock.port)
+    finally:
+        mock.stop()
 
 
 @pytest.fixture
@@ -309,6 +329,173 @@ class TestV1Vectors:
             sock.sendall(encode_message(MSG_GET_CONTROLS))
             _read_until(sock, MSG_CONTROL_INFO)                # still answering ...
             _read_until(sock, MSG_FRAME)                       # ... and still streaming
+
+
+# -- SPEC_PROTOCOL_CAMERA.md section 11.8 test vectors (protocol v2) ------------
+
+
+def _handshake_v2(sock):
+    """v2 HELLO exchange; returns (hello, control_info, stream_info, messages seen after CONTROL_INFO)."""
+    msg_type, payload = read_message(sock)
+    assert msg_type == MSG_HELLO
+    hello = json.loads(payload.decode("utf-8"))
+    assert hello.get("max_protocol_version", 1) >= 2, "this server does not offer v2"
+    sock.sendall(encode_json_message(MSG_HELLO, {"protocol_version": 2, "app": "conformance", "app_version": "0"}))
+    order = []
+    control_info = stream_info = None
+    while stream_info is None:
+        msg_type, payload = read_message(sock)
+        order.append(msg_type)
+        if msg_type == MSG_CONTROL_INFO and control_info is None:
+            control_info = json.loads(payload.decode("utf-8"))
+        elif msg_type == MSG_STREAM_INFO:
+            stream_info = json.loads(payload.decode("utf-8"))
+        else:
+            raise AssertionError(f"unexpected message 0x{msg_type:02x} in the v2 handshake")
+    return hello, control_info, stream_info, order
+
+
+def _next_stream_info(sock, state, limit=500):
+    """Read until a STREAM_INFO with ``state``; returns (info, frames seen before it)."""
+    frames = []
+    for _ in range(limit):
+        msg_type, payload = read_message(sock)
+        if msg_type == MSG_FRAME:
+            frames.append(payload)
+        elif msg_type == MSG_STREAM_INFO:
+            info = json.loads(payload.decode("utf-8"))
+            if info["state"] == state:
+                return info, frames
+    raise AssertionError(f"no STREAM_INFO {state!r} within {limit} messages")
+
+
+def _jpeg_size(data: bytes):
+    return Image.open(io.BytesIO(data)).size
+
+
+class TestV2Vectors:
+    def test_1_v2_is_negotiated_with_a_v2_server(self, v2_server):
+        client = CameraClient(LatestFrame(), port=v2_server.port)
+        try:
+            hello = client.connect(timeout=_TIMEOUT)
+            assert hello["protocol_version"] == 1 and hello["max_protocol_version"] == 2
+            assert client.session_version == 2
+        finally:
+            client.stop()
+
+    def test_1_v1_is_negotiated_with_a_v1_server(self, server):
+        client = CameraClient(LatestFrame(), port=server.port)
+        try:
+            client.connect(timeout=_TIMEOUT)
+            assert client.session_version == 1
+            assert client.stream_info is None
+        finally:
+            client.stop()
+
+    def test_1_a_v1_client_gets_the_v1_view_of_a_v2_server(self, v2_server):
+        with v2_server.connect() as sock:
+            hello, info = _handshake(sock, version=1)
+            assert hello["max_protocol_version"] == 2
+            controls = _controls_by_id(info)
+            assert set(controls) == {"exposure", "gain"}
+            assert controls["exposure"]["unit"] != "us"  # a v1 unit
+            msg_types = {read_message(sock)[0] for _ in range(10)}
+        assert msg_types <= {MSG_FRAME, MSG_CONTROL_INFO}, "a v1 session must not carry STREAM_INFO"
+
+    def test_1_a_client_version_the_server_does_not_offer_is_refused(self, v2_server):
+        with v2_server.connect() as sock:
+            msg_type, _ = read_message(sock)
+            assert msg_type == MSG_HELLO
+            sock.sendall(encode_json_message(MSG_HELLO, {"protocol_version": 3}))
+            msg_type, payload = read_message(sock)
+            assert msg_type == MSG_ERROR and b"Protocol version mismatch" in payload
+
+    def test_2_control_info_then_stream_info_before_the_first_frame(self, v2_server):
+        with v2_server.connect() as sock:
+            _hello, controls, info, order = _handshake_v2(sock)
+            assert order == [MSG_CONTROL_INFO, MSG_STREAM_INFO]
+            msg_type, _ = read_message(sock)
+            assert msg_type == MSG_FRAME
+        assert info["generation"] == 1 and info["state"] == "streaming"
+        assert info["width"] > 0 and info["height"] > 0 and info["frame_interval_us"] > 0
+        by_id = _controls_by_id(controls)
+        assert {"exposure", "gain"} <= set(by_id)
+        assert by_id["exposure"]["unit"] == "us"
+        for control in by_id.values():
+            assert {"id", "label", "type", "cur"} <= set(control)
+
+    def test_3_exposure_longer_than_the_frame_interval_lowers_fps(self, v2_server):
+        with v2_server.connect() as sock:
+            _, controls, _info, _ = _handshake_v2(sock)
+            by_id = _controls_by_id(controls)
+            fps_before = by_id["fps"]["cur"]
+            exposure = int(2 * 1e6 / fps_before)  # two frame intervals
+            assert exposure <= by_id["exposure"]["max"]
+            sock.sendall(encode_json_message(MSG_SET_CONTROL, {"id": "exposure", "value": exposure}))
+            payload, _ = _read_until(sock, MSG_CONTROL_INFO)
+        after = _controls_by_id(json.loads(payload))
+        assert after["exposure"]["cur"] == exposure
+        assert after["fps"]["cur"] < fps_before
+        assert 1e6 / after["fps"]["cur"] >= exposure  # the frame interval covers the exposure again
+        assert after["fps"]["max"] < by_id["fps"]["max"]  # the ranges moved with it
+
+    def test_3_the_next_stream_info_carries_the_new_frame_interval(self, v2_server):
+        with v2_server.connect() as sock:
+            _, _controls, info, _ = _handshake_v2(sock)
+            exposure = int(2 * info["frame_interval_us"])
+            sock.sendall(encode_json_message(MSG_SET_CONTROL, {"id": "exposure", "value": exposure}))
+            new_info, _ = _next_stream_info(sock, "streaming")
+        assert new_info["generation"] == info["generation"]
+        assert new_info["frame_interval_us"] >= exposure
+
+    def test_4_binning_reconfigures_the_stream_before_the_new_size_arrives(self, v2_server):
+        with v2_server.connect() as sock:
+            _, controls, info, _ = _handshake_v2(sock)
+            assert _controls_by_id(controls)["binning"]["restarts_stream"] is True
+            sock.sendall(encode_json_message(MSG_SET_CONTROL, {"id": "binning", "value": 2}))
+            reconfiguring, frames_before = _next_stream_info(sock, "reconfiguring")
+            assert reconfiguring["generation"] == info["generation"]
+            streaming, frames_during = _next_stream_info(sock, "streaming")
+            assert streaming["generation"] == info["generation"] + 1
+            assert (streaming["width"], streaming["height"]) == (info["width"] // 2, info["height"] // 2)
+            assert streaming["binning"] == 2
+            payload, _ = _read_until(sock, MSG_FRAME)
+        # no frame of the new size came before STREAM_INFO announced it
+        for frame in frames_before + frames_during:
+            assert _jpeg_size(frame) == (info["width"], info["height"])
+        assert _jpeg_size(payload) == (streaming["width"], streaming["height"])
+
+    def test_5_an_unknown_message_type_keeps_the_stream_going(self, v2_server):
+        with v2_server.connect() as sock:
+            _handshake_v2(sock)
+            sock.sendall(encode_message(0x7F, b"whatever"))
+            sock.sendall(encode_message(MSG_GET_CONTROLS))
+            _read_until(sock, MSG_CONTROL_INFO)
+            _read_until(sock, MSG_FRAME)
+
+    def test_6_gray8_arrives_as_frame_raw_with_a_matching_generation(self, v2_server):
+        with v2_server.connect() as sock:
+            hello, _, _info, _ = _handshake_v2(sock)
+            if "GRAY8" not in hello.get("capabilities", {}).get("frame_formats", []):
+                pytest.skip("GRAY8 is not advertised")
+            sock.sendall(encode_json_message(MSG_SET_STREAM_CONFIG, {"frame_format": "GRAY8"}))
+            streaming, _ = _next_stream_info(sock, "streaming")
+            assert streaming["frame_format"] == "GRAY8"
+            payload, _ = _read_until(sock, MSG_FRAME_RAW)
+        generation, width, height, stride, pixel_format, _timestamp = struct.unpack_from("<IHHIIQ", payload)
+        assert generation == streaming["generation"]
+        assert (width, height) == (streaming["width"], streaming["height"])
+        assert pixel_format == 1 and stride >= width
+        assert len(payload) == 24 + stride * height
+
+    def test_6_a_format_that_is_not_advertised_is_ignored(self, v2_server):
+        with v2_server.connect() as sock:
+            _handshake_v2(sock)
+            sock.sendall(encode_json_message(MSG_SET_STREAM_CONFIG, {"frame_format": "BAYER16"}))
+            sock.sendall(encode_message(MSG_GET_CONTROLS))
+            _read_until(sock, MSG_CONTROL_INFO)
+            payload, _ = _read_until(sock, MSG_FRAME)  # still JPEG frames
+        assert payload[:2] == b"\xff\xd8"
 
 
 # -- the real Python client against each server ------------------------------
