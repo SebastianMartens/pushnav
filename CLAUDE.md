@@ -118,7 +118,8 @@ python/evf/                     # main Python package
     client.py                   # camera TCP client
     protocol.py                 # camera protocol (de)serialization
     subprocess_mgr.py           # camera subprocess lifecycle manager
-    stream.py                   # fork: stream geometry (HELLO size, corrected by the first frame)
+    stream.py                   # fork: stream geometry (HELLO size, or STREAM_INFO in a v2 session), STREAM_INFO / FRAME_RAW parsing, stall timeout
+    controls.py                 # fork: restore_controls() / remember_control(): saved control values per camera profile
   solver/                       # tetra3rs (Rust) plate-solving
     solver.py                   # solver wrapper
     thread.py                   # solver worker thread
