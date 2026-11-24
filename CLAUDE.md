@@ -203,6 +203,7 @@ scripts/                        # build and dev scripts
   run_dev_linux.sh              # dev launch (Linux)
   run_dev_windows.bat           # dev launch (Windows)
   run_mock_camera.sh            # launch mock camera for testing
+  run_dev_mock_v2.py            # fork: run the app against the Python mock camera in protocol v2 mode (dev only; --v1 for v1)
   pushnav.iss                   # Inno Setup installer script (Windows)
   sync_catalog.py               # vendor objects.json from ~/Devel/Github/stargazing-buddy-site
   make_pi_label.py              # 50 x 20 mm SVG + PNG label for a ready-made Pi (QR + hotspot details)
