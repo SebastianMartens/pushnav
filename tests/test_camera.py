@@ -99,6 +99,7 @@ class TestCameraClientIntegration:
 
             assert hello["protocol_version"] == 1
             assert hello["stream_format"] == "MJPEG"
+            assert client.session_version == 1  # fork: camera-controls: a v1 server stays a v1 session
 
             controls = client.controls
             assert len(controls) == 2

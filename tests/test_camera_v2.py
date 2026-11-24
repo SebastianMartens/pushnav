@@ -475,3 +475,115 @@ class TestVersionFile:
         with open(version_json(), encoding="utf-8") as f:
             data = json.load(f)
         assert data["protocol_version"] == MAX_PROTOCOL_VERSION == 2
+
+
+# -- task 1.7: a v1 server and the v2 engine behave exactly like today ---------------------
+
+
+class TestV1Regression:
+    """The mock in its default (v1) mode stands for every real server today."""
+
+    @pytest.fixture()
+    def engine_on_v1(self, tmp_path, v1_mock):
+        from evf.config.manager import ConfigManager
+        from evf.engine.engine import Engine
+        from tests.test_subprocess_mgr import _NoopSubprocessManager
+
+        eng = Engine(config=ConfigManager(config_dir=tmp_path))
+        mgr = _NoopSubprocessManager(eng.frame_buffer, eng.state_machine, eng._config,
+                                     binary_path="/dev/null", port=v1_mock.port)
+        eng._subprocess_mgr = mgr
+        eng._fork_camera_connected(mgr.start())
+        yield eng, mgr, v1_mock
+        mgr.stop()
+
+    def test_two_controls_in_the_servers_native_unit_and_no_v2_traffic(self, engine_on_v1):
+        eng, mgr, server = engine_on_v1
+        assert mgr.client.session_version == 1
+        controls = eng.camera_controls
+        assert [c["id"] for c in controls] == ["exposure", "gain"]
+        assert controls[0]["unit"] == "ms"  # whatever the server says, untouched
+        assert mgr.client.stream_info is None
+        time.sleep(0.5)
+        assert server.stream_info_log == [] and server.stream_config_log == []
+
+    def test_the_session_answers_with_protocol_version_1(self, engine_on_v1):
+        _eng, _mgr, server = engine_on_v1
+        assert server.client_hello_log[-1]["protocol_version"] == 1
+
+    def test_startup_restore_sends_exactly_the_legacy_exposure_and_gain(self, tmp_path, v1_mock, monkeypatch):
+        from evf.config.manager import ConfigManager
+        from evf.engine.engine import Engine
+        from tests.test_subprocess_mgr import _NoopSubprocessManager
+
+        cfg = ConfigManager(config_dir=tmp_path)
+        cfg.exposure, cfg.gain = 321, 99
+        eng = Engine(config=cfg)
+        monkeypatch.setattr("evf.engine.engine._usb_video_device_present", lambda: True)
+        monkeypatch.setattr("evf.engine.engine.SubprocessManager",
+                            lambda fb, sm, config: _NoopSubprocessManager(fb, sm, config, binary_path="/dev/null",
+                                                                         port=v1_mock.port))
+        eng.startup_camera()
+        try:
+            assert _wait(lambda: len(v1_mock.set_control_log) == 2)
+            assert v1_mock.set_control_log == [{"id": "exposure", "value": 321}, {"id": "gain", "value": 99}]
+        finally:
+            eng._subprocess_mgr.stop()
+
+    def test_first_run_stores_the_range_midpoints_in_the_legacy_keys(self, tmp_path, v1_mock, monkeypatch):
+        from evf.config.manager import ConfigManager
+        from evf.engine.engine import Engine
+        from tests.test_subprocess_mgr import _NoopSubprocessManager
+
+        cfg = ConfigManager(config_dir=tmp_path)
+        eng = Engine(config=cfg)
+        monkeypatch.setattr("evf.engine.engine._usb_video_device_present", lambda: True)
+        monkeypatch.setattr("evf.engine.engine.SubprocessManager",
+                            lambda fb, sm, config: _NoopSubprocessManager(fb, sm, config, binary_path="/dev/null",
+                                                                         port=v1_mock.port))
+        eng.startup_camera()
+        try:
+            assert _wait(lambda: len(v1_mock.set_control_log) == 2)
+            # the mock advertises exposure 1..5000 and gain 0..255: the same (min + max) // 2 as before
+            assert (cfg.exposure, cfg.gain) == (2500, 127)
+            assert v1_mock.set_control_log == [{"id": "exposure", "value": 2500}, {"id": "gain", "value": 127}]
+        finally:
+            eng._subprocess_mgr.stop()
+
+    def test_set_control_writes_the_legacy_keys_and_the_profile(self, engine_on_v1):
+        eng, mgr, server = engine_on_v1
+        eng.set_control("exposure", 777)
+        eng.set_control("gain", 33)
+        assert _wait(lambda: len(server.set_control_log) >= 2)
+        assert (eng._config.exposure, eng._config.gain) == (777, 33)  # downgrade safety
+        from evf.config import profiles
+        assert profiles.get_saved_control(eng._config, mgr.client.camera_key, "exposure") == {
+            "value": 777, "unit": "ms"}
+
+    def test_the_stall_timeout_stays_two_seconds(self, engine_on_v1):
+        from evf.camera.subprocess_mgr import SubprocessManager
+
+        _eng, mgr, _server = engine_on_v1
+        assert SubprocessManager._FRAME_STALL_TIMEOUT == 2.0
+        stall, timeout = mgr._fork_stall(mgr.client)
+        assert timeout == mgr._FRAME_STALL_TIMEOUT
+        assert stall >= 0
+
+    def test_the_geometry_is_still_hello_corrected_by_the_first_frame(self, engine_on_v1):
+        eng, _mgr, _server = engine_on_v1
+        profile = eng._camera_profile
+        assert profile.expected_frame_size() is None
+        assert _wait(lambda: eng.frame_buffer.get()[0] is not None)
+        payload = profile.geometry_payload()  # reads the first frame
+        assert (payload["image_w"], payload["image_h"]) == (1280, 720)
+        assert profile.geometry.awaiting_frame is False
+
+    def test_a_v1_server_that_sends_message_ids_4_and_5_is_not_confused(self, v1_mock):
+        client = CameraClient(LatestFrame(), port=v1_mock.port)
+        try:
+            client.connect(timeout=5.0)
+            client._handle_message(MSG_STREAM_INFO, _stream_info_payload(2))
+            client._handle_message(MSG_FRAME_RAW, _raw_frame())
+            assert client.stream_info is None and client.session_version == 1
+        finally:
+            client.stop()
