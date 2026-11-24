@@ -47,6 +47,74 @@ internal sealed class LoopbackClient : IDisposable
         return LastControlInfo;
     }
 
+    /// <summary>The latest STREAM_INFO seen by <see cref="HandshakeV2"/> or <see cref="ReadUntilStreamInfo"/>.</summary>
+    public StreamInfoMessage? LastStreamInfo { get; private set; }
+
+    /// <summary>
+    /// The v2 handshake: read HELLO, answer with <c>protocol_version: 2</c>, then CONTROL_INFO and STREAM_INFO must follow, in that order,
+    /// before any frame (protocol 11.2).
+    /// </summary>
+    public (ControlInfoMessage Controls, StreamInfoMessage Stream) HandshakeV2()
+    {
+        var controls = Handshake(clientVersion: 2);
+        var stream = Read();
+        Assert.Equal(MessageType.StreamInfo, stream.Type);
+        LastStreamInfo = ProtocolJson.ParseStreamInfo(stream.Payload);
+        Assert.NotNull(LastStreamInfo);
+        return (controls, LastStreamInfo);
+    }
+
+    /// <summary>Reads until a STREAM_INFO in <paramref name="state"/>; returns it with the frames and other messages seen before it.</summary>
+    public (StreamInfoMessage Info, List<Message> Before) ReadUntilStreamInfo(string state, int maxMessages = 500)
+    {
+        var before = new List<Message>();
+        for (int i = 0; i < maxMessages; i++)
+        {
+            var m = Read();
+            if (m.Type == MessageType.ControlInfo)
+            {
+                LastControlInfo = ProtocolJson.ParseControlInfo(m.Payload);
+            }
+
+            if (m.Type == MessageType.StreamInfo)
+            {
+                var info = ProtocolJson.ParseStreamInfo(m.Payload) ?? throw new InvalidDataException("malformed STREAM_INFO");
+                LastStreamInfo = info;
+                if (info.State == state)
+                {
+                    return (info, before);
+                }
+            }
+
+            before.Add(m);
+        }
+
+        throw new TimeoutException($"No STREAM_INFO {state} within {maxMessages} messages");
+    }
+
+    /// <summary>Reads through the <paramref name="count"/>-th CONTROL_INFO (each updates <see cref="LastControlInfo"/>); returns the types of everything read, in order.</summary>
+    public List<uint> ReadThroughControlInfos(int count, int maxMessages = 500)
+    {
+        var types = new List<uint>();
+        for (int seen = 0; seen < count; )
+        {
+            if (types.Count >= maxMessages)
+            {
+                throw new TimeoutException($"No {count} CONTROL_INFO within {maxMessages} messages");
+            }
+
+            var m = Read();
+            types.Add(m.Type);
+            if (m.Type == MessageType.ControlInfo)
+            {
+                LastControlInfo = ProtocolJson.ParseControlInfo(m.Payload);
+                seen++;
+            }
+        }
+
+        return types;
+    }
+
     public Message Read() => Envelope.Read(_stream);
 
     /// <summary>Reads messages until one of <paramref name="type"/> arrives (CONTROL_INFO on the way updates <see cref="LastControlInfo"/>).</summary>

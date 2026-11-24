@@ -34,6 +34,9 @@ internal sealed class LatestFrameSlot
 
         public int PayloadLength { get; set; }
 
+        /// <summary>Size and binning of the image in the payload (v2 checks it against STREAM_INFO); default when the producer did not say.</summary>
+        public StreamGeometry Geometry { get; set; }
+
         /// <summary>1-based number of the frame in publish order (for tests and diagnostics).</summary>
         public long Sequence { get; set; }
 
@@ -56,8 +59,8 @@ internal sealed class LatestFrameSlot
         get { lock (_gate) { return _dropped; } }
     }
 
-    /// <summary>Stores a copy of <paramref name="payload"/> as the newest frame, replacing an untaken one.</summary>
-    public void Publish(ReadOnlySpan<byte> payload)
+    /// <summary>Stores a copy of <paramref name="payload"/> (an image of <paramref name="geometry"/>) as the newest frame, replacing an untaken one.</summary>
+    public void Publish(ReadOnlySpan<byte> payload, StreamGeometry geometry = default)
     {
         if (payload.Length > Envelope.MaxPayloadLength)
         {
@@ -80,6 +83,7 @@ internal sealed class LatestFrameSlot
 
             payload.CopyTo(buffer.Data.AsSpan(Envelope.HeaderSize));
             buffer.PayloadLength = payload.Length;
+            buffer.Geometry = geometry;
             buffer.Sequence = ++_published;
 
             if (_pending != null)
@@ -178,7 +182,7 @@ internal sealed class LatestFrameSlot
     }
 }
 
-/// <summary><see cref="IFrameSink"/> that feeds the <see cref="LatestFrameSlot"/>; v1 only carries JPEG frames.</summary>
+/// <summary><see cref="IFrameSink"/> that feeds the <see cref="LatestFrameSlot"/>; only JPEG frames are carried so far.</summary>
 internal sealed class LatestFrameSink : IFrameSink
 {
     private readonly LatestFrameSlot _slot;
@@ -192,9 +196,9 @@ internal sealed class LatestFrameSink : IFrameSink
     {
         if (kind == FrameKind.Jpeg)
         {
-            _slot.Publish(data);
+            _slot.Publish(data, geometry);
         }
 
-        // FrameKind.Gray8 becomes FRAME_RAW in protocol v2; a v1 session never asks for it.
+        // FrameKind.Gray8 would become FRAME_RAW in protocol v2 (task 7.3); no session asks for it yet.
     }
 }

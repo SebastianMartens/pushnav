@@ -98,7 +98,7 @@ internal sealed class CameraTcpServer : IDisposable
                 var outcome = session.Run(linked.Token);
                 return outcome switch
                 {
-                    SessionOutcome.ProtocolViolation => ExitCodes.Fatal,
+                    SessionOutcome.ProtocolViolation or SessionOutcome.BackendFailure => ExitCodes.Fatal,
                     SessionOutcome.Stopped => ExitCodeAfterStop(),
                     _ => FatalMessage != null ? ExitCodes.Fatal : ExitCodes.Ok,
                 };

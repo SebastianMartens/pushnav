@@ -276,7 +276,7 @@ public class CameraTcpServerTests
         using var client = h.Connect();
         Assert.Equal(MessageType.Hello, client.Read().Type);
 
-        client.SendJson(MessageType.Hello, ProtocolJson.SerializeClientHello(new ClientHelloMessage { ProtocolVersion = 2 }));
+        client.SendJson(MessageType.Hello, ProtocolJson.SerializeClientHello(new ClientHelloMessage { ProtocolVersion = 3 }));
 
         var error = client.Read();
         Assert.Equal(MessageType.Error, error.Type);
