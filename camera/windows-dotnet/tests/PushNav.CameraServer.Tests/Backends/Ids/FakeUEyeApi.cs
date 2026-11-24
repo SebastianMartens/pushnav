@@ -65,6 +65,16 @@ internal sealed unsafe class FakeUEyeApi : IUEyeApi, IDisposable
     /// <summary>Status <c>SetBinning</c> fails with (0 = succeed); the binning stays as it was.</summary>
     public int SetBinningStatus { get; set; }
 
+    /// <summary>
+    /// While set and not signalled, <c>WaitForNextImage</c> delivers no frame (it waits out its timeout); <see cref="GateWaiters"/>
+    /// counts the waits that found it closed. For tests that need to hold the first frame after a restart back.
+    /// </summary>
+    public ManualResetEventSlim? FrameGate { get; set; }
+
+    private int _gateWaiters;
+
+    public int GateWaiters => Volatile.Read(ref _gateWaiters);
+
     /// <summary>Status <c>SetLongExposureEnabled(false)</c> fails with (0 = succeed).</summary>
     public int LeaveLongExposureStatus { get; set; }
 
@@ -271,13 +281,6 @@ internal sealed unsafe class FakeUEyeApi : IUEyeApi, IDisposable
         return parameter >= UEyeConst.SetEnableAutoSensorGain ? UEyeConst.NotSupported : UEyeConst.Success;
     }
 
-    public int DisableBinning(int camera)
-    {
-        Log("DisableBinning");
-        _binning = 1;
-        return UEyeConst.Success;
-    }
-
     public int GetSupportedBinning(int camera, out int modes)
     {
         modes = SupportedBinningModes;
@@ -290,6 +293,13 @@ internal sealed unsafe class FakeUEyeApi : IUEyeApi, IDisposable
         if (SetBinningStatus != 0)
         {
             return SetBinningStatus;
+        }
+
+        if (mode == UEyeConst.BinningDisable)
+        {
+            _binning = 1;
+            _fps = Math.Clamp(_fps, 1.0, MaxFpsNow);
+            return UEyeConst.Success;
         }
 
         foreach (int factor in new[] { 2, 3, 4, 5, 6, 8, 16 })
@@ -494,6 +504,16 @@ internal sealed unsafe class FakeUEyeApi : IUEyeApi, IDisposable
         lock (_gate)
         {
             hasScripted = _waitScript.TryDequeue(out scripted);
+        }
+
+        var gate = FrameGate;
+        if (!hasScripted && WaitStatus == 0 && gate is { IsSet: false })
+        {
+            Interlocked.Increment(ref _gateWaiters);
+            if (!gate.Wait(Math.Max(1, timeoutMilliseconds)))
+            {
+                return UEyeConst.TimedOut;
+            }
         }
 
         int status = hasScripted ? scripted : WaitStatus;

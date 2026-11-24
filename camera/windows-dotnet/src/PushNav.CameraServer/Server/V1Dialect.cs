@@ -35,7 +35,7 @@ internal sealed class V1Dialect : IProtocolDialect
     {
         if (V1ControlAdapter.IsExposedInV1(id) && V1ControlAdapter.TryToNative(id, value, out double native))
         {
-            BackendControls.Set(_backend, _log, id, native, requested: value); // the log shows the value the v1 client sent
+            BackendControls.Set(_backend, _log, new ControlChange(id, native), requested: value); // the log shows the value the v1 client sent
         }
         else
         {

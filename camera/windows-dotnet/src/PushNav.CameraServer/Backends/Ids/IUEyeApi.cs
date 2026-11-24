@@ -48,15 +48,16 @@ internal interface IUEyeApi
     /// <summary>Sets one of the <c>IS_SET_ENABLE_AUTO_*</c> switches (1 = on, 0 = off).</summary>
     int SetAutoParameter(int camera, int parameter, double value);
 
-    int DisableBinning(int camera);
-
     /// <summary>
     /// <c>IS_GET_SUPPORTED_BINNING</c>: a bit mask of the binning modes the sensor offers (see <see cref="IdsBinning"/>); not a status.
     /// A negative status means the camera could not say, which counts as "no binning".
     /// </summary>
     int GetSupportedBinning(int camera, out int modes);
 
-    /// <summary>Sets binning with a <c>IS_BINNING_*</c> mode (<see cref="IdsBinning.ModeFor"/>); the image size follows (read it with <see cref="GetImageSize"/>).</summary>
+    /// <summary>
+    /// Sets binning with a <c>IS_BINNING_*</c> mode (<see cref="IdsBinning.ModeFor"/>, 0 for 1x1); the image size follows (read it with
+    /// <see cref="GetImageSize"/>). A camera without binning answers NOT_SUPPORTED.
+    /// </summary>
     int SetBinning(int camera, int mode);
 
     /// <summary>Size of the current image area of interest.</summary>

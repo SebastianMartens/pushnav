@@ -206,7 +206,7 @@ public class IdsServerTests : IDisposable
         client.SetControl("binning", 2);
         client.ReadUntil(MessageType.ControlInfo);
         Assert.Equal(1, _api.Binning);
-        Assert.Equal(0, _api.CallCount("SetBinning"));
+        Assert.Equal(0, _api.CallCount("SetBinning 0x3"));
 
         client.SetControl("exposure", 100_000); // far beyond 1.5 s: capped, which needs long-exposure mode
         client.ReadUntil(MessageType.ControlInfo);
@@ -285,6 +285,26 @@ public class IdsServerTests : IDisposable
         client.SetControl("fps", 5);
         client.ReadUntil(MessageType.ControlInfo);
         Assert.Equal(5.0, _api.FrameRate, precision: 2);
+    }
+
+    [Fact]
+    public void AV2BinningRequestWhileLongExposureModeIsOnIsAnsweredWithControlInfoOnly()
+    {
+        using var run = StartServer();
+        using var client = LoopbackClient.Connect(run.Port);
+        client.HandshakeV2();
+        client.SetControl("exposure", 3_000_000);
+        client.ReadUntilStreamInfo("streaming");
+        Assert.True(_api.LongExposureEnabled);
+
+        client.SetControl("binning", 2);
+        client.Send(MessageType.GetControls, []);
+        var seen = client.ReadThroughControlInfos(2);
+
+        Assert.DoesNotContain(MessageType.StreamInfo, seen); // nothing was announced, so nothing restarted
+        Assert.Equal(1, client.LastControlInfo!.Controls.Single(c => c.Id == "binning").Cur);
+        Assert.Equal(0, _api.CallCount("SetBinning 0x3"));
+        Assert.True(_api.LongExposureEnabled);
     }
 
     /// <summary>The server on the fake uEye API, on a free port; disposing the run ends the session and waits for the server.</summary>

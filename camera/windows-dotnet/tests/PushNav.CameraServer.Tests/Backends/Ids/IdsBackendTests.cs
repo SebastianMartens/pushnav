@@ -35,6 +35,15 @@ public class IdsBackendTests : IDisposable
         return backend;
     }
 
+    /// <summary>A started backend with a long wait for the first frame after a restart (no assertion depends on it running out) and its log.</summary>
+    private IdsBackend CreateBackendWithFirstFrameTimeout(TimeSpan timeout, int minimumFrameTimeoutMs, Logger log)
+    {
+        var backend = new IdsBackend(_api, 90, log) { MinimumFrameTimeoutMilliseconds = minimumFrameTimeoutMs, FirstFrameTimeout = timeout };
+        _backends.Add(backend);
+        backend.Open(backend.Probe()[0]);
+        return backend;
+    }
+
     private static ControlDescriptor Control(IdsBackend backend, string id) => backend.Controls.Single(c => c.Id == id);
 
     private sealed class CollectingSink : IFrameSink
@@ -150,7 +159,7 @@ public class IdsBackendTests : IDisposable
         Assert.Contains($"InitCamera {FakeUEyeApi.DeviceId}", calls);
         Assert.Contains("SetColorModeMono8", calls);
         Assert.Contains("SetDisplayModeDib", calls);
-        Assert.Contains("DisableBinning", calls);
+        Assert.Contains("SetBinning 0x0", calls);
         foreach (int parameter in new[] { UEyeConst.SetEnableAutoGain, UEyeConst.SetEnableAutoShutter, UEyeConst.SetEnableAutoFramerate })
         {
             Assert.Contains($"SetAutoParameter 0x{parameter:X} 0", calls);
@@ -721,18 +730,40 @@ public class IdsBackendTests : IDisposable
     }
 
     [Fact]
-    public void BinningIsRefusedWhileLongExposureModeIsOnAndNothingIsAnnounced()
+    public void BinningIsRefusedWhileLongExposureModeIsOnWithTheReasonTheUserCanActOn()
     {
         var backend = StartedBackend(out _);
         backend.SetControl(ControlIds.Exposure, 1_200_000);
         _api.ClearCalls();
 
-        var result = backend.SetControlMayRestart(ControlIds.Binning, 2);
+        // What the v2 dialect really sends: WouldRestartStream said no, so the change goes out without the flag.
+        var withoutFlag = backend.SetControl(ControlIds.Binning, 2);
+        var withFlag = backend.SetControlMayRestart(ControlIds.Binning, 2);
 
-        Assert.False(result.Accepted);
-        Assert.Contains("long-exposure mode", result.Message);
+        foreach (var result in new[] { withoutFlag, withFlag })
+        {
+            Assert.False(result.Accepted);
+            Assert.Contains("lower the exposure", result.Message); // not "cannot announce": long mode wins
+        }
+
         Assert.Empty(_api.Calls);
         Assert.False(((ICameraBackend)backend).WouldRestartStream(new ControlChange(ControlIds.Binning, 2, MayRestartStream: true)));
+    }
+
+    [Fact]
+    public void AFatalErrorDuringARestartDoesNotStartANewCaptureThread()
+    {
+        var backend = StartedBackend(out _);
+        var raised = new ManualResetEventSlim();
+        backend.Fatal += _ => raised.Set();
+        _api.WaitStatus = UEyeConst.CameraNotConnected;
+        Assert.True(raised.Wait(TimeSpan.FromSeconds(5)));
+        _api.WaitStatus = 0;
+        int starts = _api.CallCount("StartCapture");
+
+        backend.SetControlMayRestart(ControlIds.Binning, 2);
+
+        Assert.Equal(starts, _api.CallCount("StartCapture"));
     }
 
     [Fact]
@@ -806,6 +837,56 @@ public class IdsBackendTests : IDisposable
         Assert.Equal(4.0, _api.FrameRate, precision: 3);
         int mark = sink.Count;
         Assert.True(sink.WaitForFrames(mark + 3), "frames did not resume after leaving long mode");
+    }
+
+    [Fact]
+    public async Task LeavingLongExposureModeReturnsOnlyAfterTheFirstFrameFollowingTheRestart()
+    {
+        // The gap after the switch (about a second on the real camera) must fall inside "reconfiguring": the caller announces
+        // "streaming" when SetControl returns. The fake holds back every frame until the gate opens; the call cannot return before.
+        using var gate = new ManualResetEventSlim();
+        var backend = CreateBackendWithFirstFrameTimeout(TimeSpan.FromSeconds(60), minimumFrameTimeoutMs: 60_000, new Logger(TextWriter.Null, LogLevel.Debug));
+        var sink = new CollectingSink();
+        backend.Start(sink);
+        Assert.True(sink.WaitForFrames(1));
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        _api.FrameGate = gate;
+        int startsBefore = _api.CallCount("StartCapture");
+        int framesBefore = sink.Count;
+
+        var leaving = Task.Run(() => backend.SetControlMayRestart(ControlIds.Exposure, 30_000));
+        // The old capture thread is joined before the capture starts again, so a wait that finds the gate closed after that
+        // is the new capture thread asking for its first frame.
+        Assert.True(SpinWait.SpinUntil(() => _api.CallCount("StartCapture") > startsBefore, TimeSpan.FromSeconds(10)), "the capture was not restarted");
+        int waitersAtStart = _api.GateWaiters;
+        Assert.True(SpinWait.SpinUntil(() => _api.GateWaiters > waitersAtStart, TimeSpan.FromSeconds(10)), "the new capture never asked for a frame");
+        Assert.False(leaving.IsCompleted, "SetControl returned before the first frame after the restart");
+        gate.Set(); // the camera delivers
+        var result = await leaving.WaitAsync(TimeSpan.FromSeconds(20)); // times out with an exception if SetControl never returns
+        Assert.True(result.Accepted);
+        Assert.True(sink.Count > framesBefore, "no frame was captured when the call returned");
+    }
+
+    [Fact]
+    public void WhenNoFrameFollowsTheRestartTheCallReturnsAnywayWithAWarning()
+    {
+        using var gate = new ManualResetEventSlim();
+        var written = new StringWriter();
+        var log = new Logger(written, LogLevel.Info);
+        var backend = CreateBackendWithFirstFrameTimeout(TimeSpan.FromMilliseconds(100), minimumFrameTimeoutMs: 60_000, log);
+        var fatal = new List<string>();
+        backend.Fatal += fatal.Add;
+        backend.Start(new CollectingSink());
+        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        _api.FrameGate = gate; // never opened
+
+        var result = backend.SetControlMayRestart(ControlIds.Exposure, 30_000);
+
+        Assert.True(result.Accepted); // not a failure
+        Assert.Empty(fatal);
+        log.Flush(TimeSpan.FromSeconds(5));
+        Assert.Contains("No frame within", written.ToString());
+        gate.Set();
     }
 
     [Fact]

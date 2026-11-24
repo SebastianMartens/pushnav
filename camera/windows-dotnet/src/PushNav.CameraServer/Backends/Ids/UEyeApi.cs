@@ -120,12 +120,10 @@ internal sealed unsafe class UEyeApi : IUEyeApi
         return UEyeNative.SetAutoParameter(camera, parameter, &v1, &v2);
     }
 
-    public int DisableBinning(int camera) => UEyeNative.SetBinning(camera, UEyeConst.BinningDisable);
-
     public int GetSupportedBinning(int camera, out int modes)
     {
         // The "get" variant returns the mask itself (not a status), like the gain read below.
-        int value = UEyeNative.SetBinning(camera, UEyeConst.GetSupportedBinning);
+        int value = UEyeNative.SetBinning(camera, UEyeConst.BinningGetSupported);
         modes = Math.Max(0, value);
         return value >= 0 ? UEyeConst.Success : value;
     }

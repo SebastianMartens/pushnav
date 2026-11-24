@@ -5,13 +5,13 @@ using PushNav.CameraServer.Backends;
 
 namespace PushNav.CameraServer.Tests;
 
-internal static class ControlChangeExtensions
+internal static class CameraBackendTestExtensions
 {
-    /// <summary>A change as a v1 session sends it: no permission to restart the stream.</summary>
+    /// <summary>A change without permission to restart the stream (<c>MayRestartStream</c> false): what a v1 session, or a v2 session for a change that does not restart, sends.</summary>
     public static ControlResult SetControl(this ICameraBackend backend, string id, double value) =>
         backend.SetControl(new ControlChange(id, value));
 
-    /// <summary>A change as a v2 session sends it for a change it has announced: the backend may restart the stream.</summary>
+    /// <summary>A change with permission to restart the stream: what a v2 session sends for a change it announces with STREAM_INFO <c>reconfiguring</c>.</summary>
     public static ControlResult SetControlMayRestart(this ICameraBackend backend, string id, double value) =>
         backend.SetControl(new ControlChange(id, value, MayRestartStream: true));
 }

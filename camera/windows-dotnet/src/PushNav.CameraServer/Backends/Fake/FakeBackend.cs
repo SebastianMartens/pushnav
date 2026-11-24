@@ -125,6 +125,12 @@ internal sealed class FakeBackend : ICameraBackend
         var (id, value, mayRestartStream) = change;
         ArgumentNullException.ThrowIfNull(id);
 
+        // A change that would restart the stream is refused for a caller that cannot announce it (the contract of ControlChange).
+        if (!mayRestartStream && ((ICameraBackend)this).WouldRestartStream(change with { MayRestartStream = true }))
+        {
+            return ControlResult.Rejected($"'{id}' restarts the stream, which this session cannot announce");
+        }
+
         if (id == ControlIds.Binning)
         {
             // Binning restarts the stream: wait for the frame in flight, so no frame of the old size follows.
@@ -132,14 +138,14 @@ internal sealed class FakeBackend : ICameraBackend
             {
                 lock (_gate)
                 {
-                    return ApplyLocked(id, value, mayRestartStream);
+                    return ApplyLocked(id, value);
                 }
             }
         }
 
         lock (_gate)
         {
-            var result = ApplyLocked(id, value, mayRestartStream);
+            var result = ApplyLocked(id, value);
             if (result.Accepted)
             {
                 _wake.Set(); // pace changes (fps, exposure) take effect at once
@@ -193,7 +199,7 @@ internal sealed class FakeBackend : ICameraBackend
 
     // -- controls -----------------------------------------------------------
 
-    private ControlResult ApplyLocked(string id, double value, bool mayRestartStream)
+    private ControlResult ApplyLocked(string id, double value)
     {
         var controls = BuildControls();
         var control = controls.FirstOrDefault(c => c.Id == id);
@@ -205,11 +211,6 @@ internal sealed class FakeBackend : ICameraBackend
         if (!control.TryCoerce(value, out double coerced))
         {
             return ControlResult.Rejected($"value {value} not accepted for '{id}'");
-        }
-
-        if (control.RestartsStream && coerced != control.Cur && !mayRestartStream)
-        {
-            return ControlResult.Rejected($"'{id}' restarts the stream, which this session cannot announce");
         }
 
         switch (id)
