@@ -322,8 +322,10 @@ class StreamStatus:
             return {"connected": has_frame, "protocol_version": client.session_version, "stream": None}
         stream = info.to_dict()
         since = info.generation_since
-        # a frame is of this generation only if it arrived after the generation was announced
-        has_current_frame = has_frame and (since is None or frame_time > since)
+        # A frame is of this generation if it arrived at or after the announcement. ">=", not ">":
+        # time.monotonic() ticks every 15.6 ms on Windows, so the first new frame can share the
+        # announcement's tick; an old frame in that tick is cleared right after the announcement.
+        has_current_frame = has_frame and (since is None or frame_time >= since)
         if (info.generation > 1 and not has_current_frame
                 and since is not None and now - since <= RECONFIGURE_GRACE_S):
             stream["state"] = STATE_RECONFIGURING

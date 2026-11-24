@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,16 +20,17 @@ import {
 
 interface Props {
   controls: ControlDescriptorV2[];
-  stream: CameraStream;
+  /** `camera.stream`; null (or absent) while there is none, which is not "reconfiguring". */
+  stream?: CameraStream | null;
 }
 
 // fork: camera-controls (spec 6.2). The controls of a protocol v2 camera, which App.tsx renders
-// when `camera.stream` is present; a v1 camera keeps the upstream CameraControls. Each
+// when `camera.protocol_version` is 2; a v1 camera keeps the upstream CameraControls. Each
 // control by its type: int / float as a slider (log10 for `scale: "log"`), enum as buttons
 // (2 to 4 options) or a select (more). While the camera reconfigures its stream (binning)
 // the controls are disabled.
 export function CameraControlsV2({ controls, stream }: Props) {
-  const reconfiguring = stream.state === STREAM_RECONFIGURING;
+  const reconfiguring = stream?.state === STREAM_RECONFIGURING;
   return (
     <Card>
       <CardHeader>
@@ -57,12 +58,20 @@ function ControlRow({ control, disabled }: { control: ControlDescriptorV2; disab
   );
 }
 
+// The latest value of a prop, for a callback that runs after the render it was made in.
+function useLatest<T>(value: T) {
+  const ref = useRef(value);
+  useEffect(() => { ref.current = value; });
+  return ref;
+}
+
 function SliderRow({ control, disabled }: { control: ControlDescriptorV2; disabled: boolean }) {
   const id = controlId(control);
   const serverValue = serverValueOf(control);
   // The slider position (log10(value) on a log control) is what the user moves; the value
   // shown is that position snapped to the camera's step.
   const [position, setPosition] = useState(() => toSliderPosition(control, serverValue));
+  const latest = useLatest({ control, serverValue });
 
   // Reflect server-side updates (adjusting state while rendering, not in an effect)
   const [seenServerValue, setSeenServerValue] = useState(serverValue);
@@ -75,7 +84,8 @@ function SliderRow({ control, disabled }: { control: ControlDescriptorV2; disabl
     setPosition(p);
     api.setControl(id, valueAtPosition(control, p)).catch((e) => {
       console.error(e);
-      setPosition(toSliderPosition(control, serverValue)); // the camera never took it: show what it has
+      const { control: now, serverValue: current } = latest.current;
+      setPosition(toSliderPosition(now, current)); // the camera never took it: show what it has now
     });
   };
 
@@ -109,6 +119,7 @@ function EnumRow({ control, disabled }: { control: ControlDescriptorV2; disabled
   const options = control.options ?? [];
   const serverValue = serverValueOf(control);
   const [local, setLocal] = useState(serverValue);
+  const latest = useLatest(serverValue);
   const [seenServerValue, setSeenServerValue] = useState(serverValue);
   if (seenServerValue !== serverValue) {  // reflect server-side updates
     setSeenServerValue(serverValue);
@@ -119,7 +130,7 @@ function EnumRow({ control, disabled }: { control: ControlDescriptorV2; disabled
     setLocal(v);
     api.setControl(id, v).catch((e) => {
       console.error(e);
-      setLocal(serverValue); // the camera never took it: show what it has
+      setLocal(latest.current); // the camera never took it: show what it has now
     });
   };
 

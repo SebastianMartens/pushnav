@@ -160,4 +160,30 @@ describe("CameraControlsV2 when the camera did not take a value", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "1x1" })).toHaveAttribute("aria-pressed", "true"));
     expect(screen.getByRole("button", { name: "2x2" })).toHaveAttribute("aria-pressed", "false");
   });
+
+  it("resets to the latest value of the camera, not the one from the moment of the commit", async () => {
+    let reject: (e: Error) => void = () => {};
+    setControl.mockReturnValue(new Promise<void>((_, r) => { reject = r; }));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { rerender } = render(<CameraControlsV2 controls={v2Controls} stream={streaming} />);
+    const gain = screen.getAllByRole("slider")[2];
+    fireEvent.keyDown(gain, { key: "ArrowRight" }); // commits 21 against a camera that has 20
+    // meanwhile the camera reports another value (a CONTROL_INFO), then the request fails
+    rerender(<CameraControlsV2 controls={v2Controls.map((c) => (c.id === "gain" ? { ...c, cur: 35 } : c))} stream={streaming} />);
+    reject(new Error("400"));
+    await waitFor(() => expect(gain).toHaveAttribute("aria-valuenow", "35"));
+  });
+});
+
+describe("CameraControlsV2 without a stream", () => {
+  it("is not reconfiguring: the controls are enabled and no status shows", () => {
+    render(<CameraControlsV2 controls={v2Controls} stream={null} />);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    for (const button of screen.getAllByRole("button")) expect(button).toBeEnabled();
+  });
+
+  it("renders with the stream prop left out", () => {
+    render(<CameraControlsV2 controls={v2Controls} />);
+    expect(screen.getAllByRole("slider")).toHaveLength(3);
+  });
 });

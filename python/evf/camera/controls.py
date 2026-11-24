@@ -120,10 +120,14 @@ class ControlDescriptor:
         return int(round(value))
 
     def clamp(self, value: Any) -> Any:
-        """``value`` limited to ``[min, max]`` (an enum has no range: its options are the check)."""
+        """``value`` limited to ``[min, max]``, as this control's type (an enum has no range: its options are the check).
+
+        The bound's own type must not leak: an int exposure clamped to a float cap stays an int,
+        a float fps clamped to an int maximum stays a float.
+        """
         if self.type == "enum" or not (_is_number(self.min) and _is_number(self.max)):
             return value
-        return min(max(value, self.min), self.max)
+        return self.coerce(min(max(value, self.min), self.max))
 
     def default_value(self) -> Any | None:
         """The descriptor's own ``default`` if it is a valid value, else None."""

@@ -67,7 +67,7 @@ export default function App() {
                 </div>
                 <div className="flex flex-col gap-2">
                   {/* fork: camera-controls: a protocol v2 camera has its own controls */}
-                  {state.camera.stream ? <CameraControlsV2 controls={state.controls} stream={state.camera.stream} /> : <CameraControls controls={state.controls} />}
+                  {state.camera.protocol_version === 2 ? <CameraControlsV2 controls={state.controls} stream={state.camera.stream} /> : <CameraControls controls={state.controls} />}
                   <Connectivity state={state} />
                   <Settings
                     state={state}

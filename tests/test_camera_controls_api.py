@@ -23,7 +23,7 @@ from evf.engine.pointing import PointingState
 from evf.engine.state import StateMachine
 from evf.webserver.server import WebServer
 from tests.mock_camera_server import MockCameraServer
-from tests.test_camera_controls import FakeClient, _all_v2, _gain, _v1_exposure
+from tests.test_camera_controls import FakeClient, _all_v2, _exposure_v2, _fps, _gain, _v1_exposure
 from tests.test_camera_v2 import _stream_info_payload, _wait
 
 
@@ -55,6 +55,16 @@ class TestValidateControlRequest:
     def test_a_clamped_int_is_still_an_int_and_a_clamped_float_a_float(self):
         assert isinstance(controls.validate_control_request(_all_v2(), "gain", 500), int)
         assert isinstance(controls.validate_control_request(_all_v2(), "fps", 500), float)
+
+    def test_the_type_of_the_bound_does_not_leak_into_the_clamped_value(self):
+        int_exposure_float_cap = controls.capped_controls([_exposure_v2()], 1_000_000.0)
+        clamped = controls.validate_control_request(int_exposure_float_cap, "exposure", 3_000_000)
+        assert clamped == 1_000_000 and isinstance(clamped, int)
+        float_fps_int_max = [_fps(max=10)]
+        clamped = controls.validate_control_request(float_fps_int_max, "fps", 50)
+        assert clamped == 10.0 and isinstance(clamped, float)
+        clamped = controls.validate_control_request([_fps(min=1)], "fps", 0.1)
+        assert clamped == 1.0 and isinstance(clamped, float)
 
     def test_the_cap_in_the_descriptors_is_what_is_clamped_to(self):
         capped = controls.capped_controls(_all_v2(), 1_000_000)
@@ -375,6 +385,14 @@ class TestStreamStatus:
 
         buffer.set(b"new-size frame", 200.4, 1)  # the first frame of generation 2 ends the wait
         out = status.poll(client, 200.5)
+        assert _state(out) == "streaming" and out["connected"] is True
+
+    def test_a_frame_in_the_same_clock_tick_as_the_announcement_ends_the_wait(self):
+        """time.monotonic() ticks every 15.6 ms on Windows: the first new frame can share the announcement's time."""
+        status, buffer = _status()
+        client = _Client(info=_Info(2, since=200.0))
+        buffer.set(b"new", 200.0, 1)
+        out = status.poll(client, 200.01)
         assert _state(out) == "streaming" and out["connected"] is True
 
     def test_a_stale_frame_does_not_end_the_wait(self):
