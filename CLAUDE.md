@@ -234,7 +234,8 @@ Dev dependencies: **nuitka** (builds), **pytest** (tests), and **segno**,
 (QR code, outlined and kerned text, and the PNG). The Pi package is built
 with `--no-dev`, so none of these reach it.
 Docs dependency group (`uv sync --group docs`): **mkdocs-material** for the
-GitHub Pages site under `docs/`.
+GitHub Pages site under `docs/`. fork: the fork has no Pages site; `docs.yml` only checks
+that `mkdocs build --strict` passes and does not deploy.
 
 The runtime app does **not** depend on `~/Devel/Github/stargazing-buddy-site`.
 That repo is only consulted by `scripts/sync_catalog.py` when the maintainer

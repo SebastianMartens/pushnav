@@ -1,6 +1,19 @@
-name: Deploy docs
+name: Docs build
+
+# fork: GitHub Pages is only enabled on the upstream repo, so this fork does
+# not deploy the docs site (deploy-pages failed with 404 on every push). It
+# only checks that the site still builds. Upstream's docs.yml also runs
+# upload-pages-artifact and a deploy job; drop those when merging upstream.
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/docs.yml'
   push:
     branches: [main]
     paths:
@@ -13,12 +26,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: false
 
 jobs:
   build:
@@ -32,16 +39,3 @@ jobs:
           enable-cache: true
       - run: uv sync --only-group docs
       - run: uv run mkdocs build --strict
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
