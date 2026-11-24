@@ -5,14 +5,19 @@ using PushNav.CameraServer.Backends;
 
 namespace PushNav.CameraServer.Server;
 
-/// <summary>What a dialect needs from the session: a way to write messages, and the lock that orders them with frames.</summary>
+/// <summary>What a dialect needs from the session: a way to write messages that is ordered with the frames.</summary>
 internal interface ISessionChannel
 {
-    /// <summary>Held by the frame writer while it checks and writes a frame; a dialect holds it to change what frames are let through.</summary>
-    object WriteLock { get; }
-
-    /// <summary>Writes one message under <see cref="WriteLock"/> (the lock is reentrant). Silent once the session has ended.</summary>
+    /// <summary>Writes one message. Silent once the session has ended.</summary>
     void Send(uint type, byte[] payload);
+
+    /// <summary>
+    /// Runs <paramref name="build"/> and sends what it returns (nothing for null) as one step that no frame can interleave with:
+    /// the frame writer checks <see cref="IProtocolDialect.AdmitFrame"/> and writes under the same lock. This is the only way a
+    /// dialect changes what frames are let through, so "AdmitFrame agrees with the last STREAM_INFO sent" holds by construction.
+    /// Not run at all once the session has ended.
+    /// </summary>
+    void SendIfAny(uint type, Func<byte[]?> build);
 }
 
 /// <summary>
@@ -30,14 +35,15 @@ internal interface IProtocolDialect
     void SendControlInfo();
 
     /// <summary>
-    /// SET_CONTROL with a usable id and value. Always answers with CONTROL_INFO. Throws <see cref="CameraException"/> only when the
-    /// stream could not be restarted (the session then ends with an ERROR); a control the camera merely refuses is logged.
+    /// SET_CONTROL with a usable id and value. Always answers with CONTROL_INFO. A control the camera merely refuses is logged and
+    /// answered like any other; only a stream restart that fails throws, <see cref="StreamRestartFailedException"/>, and the
+    /// session then ends with an ERROR.
     /// </summary>
     void HandleSetControl(string id, double value);
 
     /// <summary>SET_STREAM_CONFIG (v2 only; a v1 session ignores it like any unknown type).</summary>
     void HandleSetStreamConfig(byte[] payload);
 
-    /// <summary>True if the frame writer may send a frame of this geometry now. Called with <see cref="ISessionChannel.WriteLock"/> held.</summary>
+    /// <summary>True if the frame writer may send a frame of this geometry now. The session calls it under the channel's send lock.</summary>
     bool AdmitFrame(StreamGeometry geometry);
 }

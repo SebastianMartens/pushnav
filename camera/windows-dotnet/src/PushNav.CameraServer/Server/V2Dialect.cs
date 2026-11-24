@@ -11,7 +11,8 @@ namespace PushNav.CameraServer.Server;
 /// Protocol v2 (<c>SPEC_PROTOCOL_CAMERA.md</c> 11): the backend's native controls (exposure in µs without the v1 cap, <c>fps</c>, gain,
 /// binning where the camera has it), CONTROL_INFO with every range after every SET_CONTROL, and STREAM_INFO for the stream:
 /// generation 1 after the first CONTROL_INFO, the same generation again when the frame interval changes, and
-/// <c>reconfiguring</c> then <c>streaming</c> with generation + 1 around a change that restarts the stream.
+/// <c>reconfiguring</c> then <c>streaming</c> with generation + 1 around a change that restarts the stream. Which changes restart the
+/// stream is the backend's call (<see cref="ICameraBackend.RestartsStream"/>).
 /// </summary>
 internal sealed class V2Dialect : IProtocolDialect
 {
@@ -32,11 +33,9 @@ internal sealed class V2Dialect : IProtocolDialect
     public void SendInitial()
     {
         SendControlInfo();
-        var controls = _backend.Controls;
-        lock (_channel.WriteLock)
-        {
-            SendStreamInfo(_announcer.Start(_backend.Geometry, FrameIntervalUs(controls), FrameTiming.ExposureUs(controls)));
-        }
+        var geometry = _backend.Geometry;
+        var timing = CurrentTiming();
+        Announce(() => _announcer.Start(geometry, timing));
     }
 
     public void SendControlInfo() =>
@@ -44,22 +43,17 @@ internal sealed class V2Dialect : IProtocolDialect
 
     public void HandleSetControl(string id, double value)
     {
-        var control = _backend.Controls.FirstOrDefault(c => c.Id == id);
-        if (control == null)
-        {
-            _log.Debug($"Unknown control: {id}"); // servers ignore ids they do not advertise and answer with CONTROL_INFO
-            SendControlInfo();
-        }
-        else if (RestartsStream(control, value))
+        if (_backend.RestartsStream(id, value))
         {
             Reconfigure(id, value);
+            return;
         }
-        else
-        {
-            Apply(id, value);
-            SendControlInfo();
-            AnnounceIntervalChange();
-        }
+
+        // servers ignore ids they do not advertise and answer with CONTROL_INFO: the backend rejects them
+        BackendControls.Set(_backend, _log, id, value);
+        SendControlInfo();
+        var timing = CurrentTiming();
+        Announce(() => _announcer.TimingChanged(timing));
     }
 
     public void HandleSetStreamConfig(byte[] payload)
@@ -73,18 +67,10 @@ internal sealed class V2Dialect : IProtocolDialect
             return;
         }
 
-        lock (_channel.WriteLock)
-        {
-            SendStreamInfo(_announcer.Repeat(FrameTiming.ExposureUs(_backend.Controls)));
-        }
+        Announce(() => _announcer.Repeat());
     }
 
     public bool AdmitFrame(StreamGeometry geometry) => _announcer.Admits(geometry);
-
-    // -- changes that restart the stream -----------------------------------------
-
-    private static bool RestartsStream(ControlDescriptor control, double requested) =>
-        control.RestartsStream && control.TryCoerce(requested, out double coerced) && coerced != control.Cur;
 
     /// <summary>
     /// <c>reconfiguring</c>, the backend restarts its stream in-process, CONTROL_INFO with the new ranges, then <c>streaming</c> with
@@ -93,76 +79,20 @@ internal sealed class V2Dialect : IProtocolDialect
     /// </summary>
     private void Reconfigure(string id, double value)
     {
-        lock (_channel.WriteLock)
-        {
-            SendStreamInfo(_announcer.BeginReconfiguration(FrameTiming.ExposureUs(_backend.Controls)));
-        }
-
-        ControlResult result;
-        try
-        {
-            result = _backend.SetControl(id, value);
-        }
-        catch (CameraException ex)
-        {
-            throw new CameraException($"Stream reconfiguration failed ({id} = {value}): {ex.Message}", ex);
-        }
-
-        if (!result.Accepted)
-        {
-            _log.Debug($"SET_CONTROL {id}={value} rejected: {result.Message}");
-        }
-        else
-        {
-            _log.Debug($"Set {id} = {value} (stream restarted)");
-        }
-
+        Announce(() => _announcer.BeginReconfiguration());
+        var result = BackendControls.Set(_backend, _log, id, value, restartsStream: true); // throws if the restart fails
         SendControlInfo();
-        var controls = _backend.Controls;
-        long interval = FrameIntervalUs(controls);
-        long exposure = FrameTiming.ExposureUs(controls);
-        lock (_channel.WriteLock)
-        {
-            SendStreamInfo(result.Accepted ? _announcer.Complete(_backend.Geometry, interval, exposure) : _announcer.Resume(interval, exposure));
-        }
+        var geometry = _backend.Geometry;
+        var timing = CurrentTiming();
+        Announce(() => result.Accepted ? _announcer.Complete(geometry, timing) : _announcer.Resume(timing));
     }
 
-    // -- changes inside a stream ---------------------------------------------------
+    private StreamTiming CurrentTiming() => StreamTiming.From(_backend.Controls, _backend.DefaultFps);
 
-    private void Apply(string id, double value)
-    {
-        try
-        {
-            var result = _backend.SetControl(id, value);
-            if (!result.Accepted)
-            {
-                _log.Debug($"SET_CONTROL {id}={value} rejected: {result.Message}");
-            }
-            else
-            {
-                _log.Debug($"Set {id} = {value}");
-            }
-        }
-        catch (CameraException ex)
-        {
-            _log.Warn($"SET_CONTROL {id} failed: {ex.Message}");
-        }
-    }
-
-    private void AnnounceIntervalChange()
-    {
-        var controls = _backend.Controls;
-        lock (_channel.WriteLock)
-        {
-            var info = _announcer.IntervalChanged(FrameIntervalUs(controls), FrameTiming.ExposureUs(controls));
-            if (info != null)
-            {
-                SendStreamInfo(info);
-            }
-        }
-    }
-
-    private long FrameIntervalUs(IReadOnlyList<ControlDescriptor> controls) => FrameTiming.FrameIntervalUs(controls, _backend.DefaultFps);
-
-    private void SendStreamInfo(StreamInfoMessage info) => _channel.Send(MessageType.StreamInfo, ProtocolJson.Serialize(info));
+    /// <summary>
+    /// The one place the announcer changes: the transition and the send are one step under the channel's lock, so what the frame
+    /// writer admits is always what the client was last told.
+    /// </summary>
+    private void Announce(Func<StreamInfoMessage?> transition) =>
+        _channel.SendIfAny(MessageType.StreamInfo, () => transition() is { } info ? ProtocolJson.Serialize(info) : null);
 }

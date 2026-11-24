@@ -18,7 +18,7 @@ public class LatestFrameSlotTests
 
         for (int i = 1; i <= 100; i++)
         {
-            slot.Publish(Frame(i));
+            slot.Publish(Frame(i), default);
         }
 
         var taken = slot.TryTake();
@@ -34,7 +34,7 @@ public class LatestFrameSlotTests
     public void BufferCarriesAHeaderGapSoTheWriterCanSendItInOneWrite()
     {
         var slot = new LatestFrameSlot();
-        slot.Publish(Frame(7));
+        slot.Publish(Frame(7), default);
         var buffer = slot.TryTake()!;
 
         Envelope.WriteHeader(buffer.Data, MessageType.Frame, buffer.PayloadLength);
@@ -56,7 +56,7 @@ public class LatestFrameSlotTests
         consumer.Start();
 
         Assert.False(consumer.Join(100), "Take returned without a frame");
-        slot.Publish(Frame(1));
+        slot.Publish(Frame(1), default);
 
         Assert.True(consumer.Join(TimeSpan.FromSeconds(5)));
         Assert.Equal(1, got!.Sequence);
@@ -99,7 +99,7 @@ public class LatestFrameSlotTests
         var slot = new LatestFrameSlot();
         slot.Complete();
 
-        slot.Publish(Frame(1));
+        slot.Publish(Frame(1), default);
 
         Assert.Null(slot.TryTake());
     }
@@ -108,7 +108,7 @@ public class LatestFrameSlotTests
     public void ClearDropsAStaleFrame()
     {
         var slot = new LatestFrameSlot();
-        slot.Publish(Frame(1));
+        slot.Publish(Frame(1), default);
 
         slot.Clear();
 
@@ -119,11 +119,11 @@ public class LatestFrameSlotTests
     public void AFrameTakenWhileTheNextIsPublishedStaysIntact()
     {
         var slot = new LatestFrameSlot();
-        slot.Publish(Frame(1));
+        slot.Publish(Frame(1), default);
         var inFlight = slot.TryTake()!;
 
-        slot.Publish(Frame(2));
-        slot.Publish(Frame(3)); // overwrites 2, must not touch the buffer that is "being sent"
+        slot.Publish(Frame(2), default);
+        slot.Publish(Frame(3), default); // overwrites 2, must not touch the buffer that is "being sent"
 
         Assert.Equal(Frame(1), inFlight.Payload.ToArray());
         slot.Return(inFlight);
@@ -135,14 +135,14 @@ public class LatestFrameSlotTests
     {
         var slot = new LatestFrameSlot();
         var seen = new HashSet<LatestFrameSlot.Buffer>(ReferenceEqualityComparer.Instance);
-        slot.Publish(Frame(0));
+        slot.Publish(Frame(0), default);
         var held = slot.TryTake()!; // a writer stuck on a slow socket: never returned
         seen.Add(held);
 
         for (int i = 1; i <= 200; i++)
         {
-            slot.Publish(Frame(i));
-            slot.Publish(Frame(i)); // two publishes per take: one frame is overwritten each round
+            slot.Publish(Frame(i), default);
+            slot.Publish(Frame(i), default); // two publishes per take: one frame is overwritten each round
             var buffer = slot.TryTake()!;
             seen.Add(buffer);
             slot.Return(buffer);
@@ -155,12 +155,12 @@ public class LatestFrameSlotTests
     public void GrowsForLargerFramesAndKeepsContent()
     {
         var slot = new LatestFrameSlot();
-        slot.Publish(new byte[10]);
+        slot.Publish(new byte[10], default);
         slot.Return(slot.TryTake()!);
         var big = new byte[500_000];
         new Random(5).NextBytes(big);
 
-        slot.Publish(big);
+        slot.Publish(big, default);
 
         Assert.Equal(big, slot.TryTake()!.Payload.ToArray());
     }
@@ -205,7 +205,7 @@ public class LatestFrameSlotTests
         var sw = System.Diagnostics.Stopwatch.StartNew();
         for (int i = 1; i <= 5000; i++)
         {
-            slot.Publish(Frame(i));
+            slot.Publish(Frame(i), default);
         }
 
         sw.Stop();

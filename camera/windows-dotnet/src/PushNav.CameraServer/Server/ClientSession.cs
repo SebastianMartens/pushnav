@@ -185,7 +185,7 @@ internal sealed class ClientSession : ISessionChannel
         }
 
         _dialect = clientVersion == 1 ? new V1Dialect(_backend, this, _log) : new V2Dialect(_backend, this, _log);
-        _log.Info($"Client HELLO ok (app={clientHello.App ?? "?"} {clientHello.AppVersion ?? string.Empty}, protocol {clientVersion})");
+        _log.Info($"Client HELLO ok (app={clientHello.App ?? "?"} {clientHello.AppVersion ?? string.Empty}, protocol {_dialect.Version})");
         return null;
     }
 
@@ -276,9 +276,10 @@ internal sealed class ClientSession : ISessionChannel
                 _log.Info($"Client disconnected while sending: {ex.Message}");
                 return SessionOutcome.Disconnected;
             }
-            catch (CameraException ex)
+            catch (StreamRestartFailedException ex)
             {
                 // The stream could not be restarted: nobody knows what state the camera is in (protocol 11.5: ERROR, exit 1).
+                // Nothing else a control change throws ends the session: a refused control is a ControlResult.
                 _log.Error(ex.Message);
                 SendFinalError(ex.Message);
                 return SessionOutcome.BackendFailure;
@@ -371,11 +372,25 @@ internal sealed class ClientSession : ISessionChannel
         }
     }
 
-    object ISessionChannel.WriteLock => _writeLock;
-
     private IProtocolDialect Dialect => _dialect ?? throw new InvalidOperationException("Handshake not finished");
 
     void ISessionChannel.Send(uint type, byte[] payload) => Send(type, payload);
+
+    void ISessionChannel.SendIfAny(uint type, Func<byte[]?> build)
+    {
+        lock (_writeLock)
+        {
+            if (_ended)
+            {
+                return; // the session is over (final ERROR sent or closing)
+            }
+
+            if (build() is { } payload)
+            {
+                Send(type, payload); // the lock is reentrant
+            }
+        }
+    }
 
     private void Send(uint type, byte[] payload)
     {

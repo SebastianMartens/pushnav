@@ -35,22 +35,7 @@ internal sealed class V1Dialect : IProtocolDialect
     {
         if (V1ControlAdapter.IsExposedInV1(id) && V1ControlAdapter.TryToNative(id, value, out double native))
         {
-            try
-            {
-                var result = _backend.SetControl(id, native);
-                if (!result.Accepted)
-                {
-                    _log.Debug($"SET_CONTROL {id}={value} rejected: {result.Message}");
-                }
-                else
-                {
-                    _log.Debug($"Set {id} = {value}");
-                }
-            }
-            catch (CameraException ex)
-            {
-                _log.Warn($"SET_CONTROL {id} failed: {ex.Message}");
-            }
+            BackendControls.Set(_backend, _log, id, native);
         }
         else
         {

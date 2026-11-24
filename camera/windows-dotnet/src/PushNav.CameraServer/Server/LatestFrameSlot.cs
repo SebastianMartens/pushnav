@@ -34,7 +34,7 @@ internal sealed class LatestFrameSlot
 
         public int PayloadLength { get; set; }
 
-        /// <summary>Size and binning of the image in the payload (v2 checks it against STREAM_INFO); default when the producer did not say.</summary>
+        /// <summary>Size and binning of the image in the payload (a v2 session checks it against STREAM_INFO).</summary>
         public StreamGeometry Geometry { get; set; }
 
         /// <summary>1-based number of the frame in publish order (for tests and diagnostics).</summary>
@@ -60,7 +60,7 @@ internal sealed class LatestFrameSlot
     }
 
     /// <summary>Stores a copy of <paramref name="payload"/> (an image of <paramref name="geometry"/>) as the newest frame, replacing an untaken one.</summary>
-    public void Publish(ReadOnlySpan<byte> payload, StreamGeometry geometry = default)
+    public void Publish(ReadOnlySpan<byte> payload, StreamGeometry geometry)
     {
         if (payload.Length > Envelope.MaxPayloadLength)
         {

@@ -115,6 +115,9 @@ internal sealed class LoopbackClient : IDisposable
         return types;
     }
 
+    /// <summary>Changes how long a <see cref="Read"/> waits before it gives up (the connection stays usable).</summary>
+    public void SetReceiveTimeout(int milliseconds) => _tcp.ReceiveTimeout = milliseconds;
+
     public Message Read() => Envelope.Read(_stream);
 
     /// <summary>Reads messages until one of <paramref name="type"/> arrives (CONTROL_INFO on the way updates <see cref="LastControlInfo"/>).</summary>
@@ -151,6 +154,13 @@ internal sealed class LoopbackClient : IDisposable
     {
         _stream.Write(bytes);
         _stream.Flush();
+    }
+
+    /// <summary>Drops the connection with a reset instead of a clean close (a client that crashed or was killed).</summary>
+    public void Abort()
+    {
+        _tcp.Client.LingerState = new System.Net.Sockets.LingerOption(true, 0);
+        Dispose();
     }
 
     public void Dispose()

@@ -53,45 +53,6 @@ public class V2SessionTests
         }
     }
 
-    /// <summary>A fake camera whose stream cannot be restarted: the binning change throws.</summary>
-    private sealed class FailingRestartBackend : ICameraBackend
-    {
-        private readonly FakeBackend _inner = new(null, 90, NullLog);
-
-        public string Id => _inner.Id;
-
-        public string HelloName => _inner.HelloName;
-
-        public DeviceInfo Device => _inner.Device;
-
-        public StreamGeometry Geometry => _inner.Geometry;
-
-        public int DefaultFps => _inner.DefaultFps;
-
-        public SensorInfo? Sensor => _inner.Sensor;
-
-        public IReadOnlyList<ControlDescriptor> Controls => _inner.Controls;
-
-        public event Action<string>? Fatal
-        {
-            add => _inner.Fatal += value;
-            remove => _inner.Fatal -= value;
-        }
-
-        public IReadOnlyList<DeviceInfo> Probe() => _inner.Probe();
-
-        public void Open(DeviceInfo device) => _inner.Open(device);
-
-        public ControlResult SetControl(string id, double value) =>
-            id == ControlIds.Binning ? throw new CameraException("image buffers could not be allocated") : _inner.SetControl(id, value);
-
-        public void Start(IFrameSink sink) => _inner.Start(sink);
-
-        public void Stop() => _inner.Stop();
-
-        public void Dispose() => _inner.Dispose();
-    }
-
     private static ControlJson Control(ControlInfoMessage info, string id) => info.Controls.Single(c => c.Id == id);
 
     /// <summary>Width and height from the JPEG's start-of-frame marker.</summary>
@@ -359,15 +320,62 @@ public class V2SessionTests
     [Fact]
     public void A_stream_that_cannot_be_restarted_ends_the_session_with_an_error_and_code_1()
     {
-        using var h = new Harness(new FailingRestartBackend());
+        var backend = new ScriptedBackend { OnSetControl = (id, _) => id == "binning" ? throw new CameraException("image buffers could not be allocated") : null };
+        using var h = new Harness(backend);
         using var client = h.Connect();
         client.HandshakeV2();
 
         client.SetControl("binning", 2);
 
-        var error = client.ReadUntil(MessageType.Error);
-        Assert.Contains("image buffers could not be allocated", Encoding.UTF8.GetString(error.Payload));
+        // everything up to the ERROR: STREAM_INFO reconfiguring comes first, and after it no frame gets through
+        var seen = new List<(uint Type, string? State)>();
+        while (true)
+        {
+            var m = client.Read();
+            seen.Add((m.Type, m.Type == MessageType.StreamInfo ? ProtocolJson.ParseStreamInfo(m.Payload)!.State : null));
+            if (m.Type == MessageType.Error)
+            {
+                Assert.Contains("image buffers could not be allocated", Encoding.UTF8.GetString(m.Payload));
+                break;
+            }
+        }
+
+        int reconfiguring = seen.FindIndex(e => e.State == "reconfiguring");
+        Assert.True(reconfiguring >= 0, "STREAM_INFO reconfiguring must come before the ERROR");
+        Assert.DoesNotContain(seen.Skip(reconfiguring + 1), e => e.Type == MessageType.Frame);
+        Assert.DoesNotContain(seen.Skip(reconfiguring + 1), e => e.State == "streaming");
         Assert.Equal(ExitCodes.Fatal, h.WaitForExit());
+    }
+
+    [Fact]
+    public void A_control_the_camera_refuses_does_not_end_a_v2_session()
+    {
+        var backend = new ScriptedBackend { OnSetControl = (id, _) => id == "gain" ? throw new CameraException("the camera did not take it") : null };
+        using var h = new Harness(backend);
+        using var client = h.Connect();
+        client.HandshakeV2();
+
+        client.SetControl("gain", 70);
+
+        client.ReadUntil(MessageType.ControlInfo);
+        client.ReadUntil(MessageType.Frame); // still streaming
+    }
+
+    [Fact]
+    public void A_client_that_vanishes_right_after_its_hello_ends_the_session_quietly()
+    {
+        // The controls are held back until the client is gone, so the first write after the handshake meets a reset connection.
+        using var gate = new ManualResetEventSlim();
+        using var h = new Harness(new ScriptedBackend { ControlsGate = gate });
+        var client = h.Connect();
+        Assert.Equal(MessageType.Hello, client.Read().Type);
+        client.SendJson(MessageType.Hello, ProtocolJson.SerializeClientHello(new ClientHelloMessage { ProtocolVersion = 2, App = "evf-test" }));
+
+        client.Abort();
+        Thread.Sleep(200); // let the reset reach the server
+        gate.Set();
+
+        Assert.Equal(ExitCodes.Ok, h.WaitForExit()); // a client that leaves is a normal end, not a crash
     }
 
     // -- SET_STREAM_CONFIG ------------------------------------------------------------

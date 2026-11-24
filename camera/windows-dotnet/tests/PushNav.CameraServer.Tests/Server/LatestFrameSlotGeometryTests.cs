@@ -28,7 +28,7 @@ public class LatestFrameSlotGeometryTests
         slot.Publish([1], new StreamGeometry(968, 608, 2));
         slot.Return(slot.TryTake()!); // safe: a frame was just published
 
-        slot.Publish([2]);
+        slot.Publish([2], default);
 
         Assert.Equal(default, slot.TryTake()!.Geometry); // safe: a frame was just published
     }

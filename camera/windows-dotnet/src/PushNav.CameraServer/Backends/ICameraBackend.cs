@@ -39,7 +39,14 @@ internal enum PixelFormat
 }
 
 /// <summary>Width, height, binning and pixel format of the frames currently produced (spec 1.1 "Stream geometry").</summary>
-internal readonly record struct StreamGeometry(int Width, int Height, int Binning = 1, PixelFormat Format = PixelFormat.Gray8);
+internal readonly record struct StreamGeometry(int Width, int Height, int Binning = 1, PixelFormat Format = PixelFormat.Gray8)
+{
+    /// <summary>
+    /// True if frames of <paramref name="other"/> look like frames of this geometry to the client: same size and binning
+    /// (the pixel format is the backend's business; every frame on the wire is a JPEG).
+    /// </summary>
+    public bool HasSameImageAs(StreamGeometry other) => Width == other.Width && Height == other.Height && Binning == other.Binning;
+}
 
 /// <summary>What a frame handed to <see cref="IFrameSink"/> contains.</summary>
 internal enum FrameKind
@@ -114,6 +121,19 @@ internal interface ICameraBackend : IDisposable
 
     /// <summary>Applies a control change (clamped and rounded per the protocol); may change other controls or the geometry.</summary>
     ControlResult SetControl(string id, double value);
+
+    /// <summary>
+    /// True if <see cref="SetControl"/> with these arguments restarts the stream (new geometry or restart of the capture), so a v2
+    /// session wraps it in STREAM_INFO <c>reconfiguring</c> and <c>streaming</c> with the next generation (protocol 11.5). The
+    /// default is every change of a control that is marked <see cref="ControlDescriptor.RestartsStream"/> to a value that is
+    /// accepted and differs from the current one. A backend overrides it when whether a change restarts depends on more than the
+    /// descriptor (say, a long-exposure mode that is left only when the exposure drops back into the normal range).
+    /// </summary>
+    bool RestartsStream(string id, double value)
+    {
+        var control = Controls.FirstOrDefault(c => c.Id == id);
+        return control is { RestartsStream: true } && control.TryCoerce(value, out double coerced) && coerced != control.Cur;
+    }
 
     /// <summary>Starts producing frames on a backend thread, pushing JPEG frames into <paramref name="sink"/>.</summary>
     void Start(IFrameSink sink);
