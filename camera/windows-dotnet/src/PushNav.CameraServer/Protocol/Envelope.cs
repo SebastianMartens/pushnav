@@ -5,7 +5,7 @@ using System.Buffers.Binary;
 
 namespace PushNav.CameraServer.Protocol;
 
-/// <summary>Message type ids of camera protocol v1 (SPEC_PROTOCOL_CAMERA.md sections 4-5).</summary>
+/// <summary>Message type ids of the camera protocol (SPEC_PROTOCOL_CAMERA.md sections 4-5 and 11).</summary>
 internal static class MessageType
 {
     // camera -> app
@@ -13,10 +13,13 @@ internal static class MessageType
     public const uint Frame = 0x01;
     public const uint ControlInfo = 0x02;
     public const uint Error = 0x03;
+    public const uint StreamInfo = 0x04; // v2
+    public const uint FrameRaw = 0x05;   // v2, not sent (GRAY8 is not advertised)
 
     // app -> camera
     public const uint SetControl = 0x11;
     public const uint GetControls = 0x12;
+    public const uint SetStreamConfig = 0x15; // v2
 
     public static string Name(uint type) => type switch
     {
@@ -24,8 +27,11 @@ internal static class MessageType
         Frame => "FRAME",
         ControlInfo => "CONTROL_INFO",
         Error => "ERROR",
+        StreamInfo => "STREAM_INFO",
+        FrameRaw => "FRAME_RAW",
         SetControl => "SET_CONTROL",
         GetControls => "GET_CONTROLS",
+        SetStreamConfig => "SET_STREAM_CONFIG",
         _ => $"UNKNOWN(0x{type:x2})",
     };
 }

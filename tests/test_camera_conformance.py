@@ -185,10 +185,28 @@ def server(request):
             _stop_exe(handle)
 
 
-@pytest.fixture(params=["mock"])  # slice S5 adds the C# exe here
+@pytest.fixture(params=_SERVER_KINDS)
 def v2_server(request):
-    """A server that offers protocol v2."""
-    mock = MockCameraServer(port=0, fps=20, v2=True)
+    """A server that offers protocol v2: the mock in v2 mode, and the C# exe (it always offers v2)."""
+    if request.param == "mock":
+        mock = MockCameraServer(port=0, fps=20, v2=True)
+        mock.start()
+        try:
+            yield ServerHandle("mock", mock.port)
+        finally:
+            mock.stop()
+    else:
+        handle = _start_exe(_exe_path())
+        try:
+            yield handle
+        finally:
+            _stop_exe(handle)
+
+
+@pytest.fixture
+def v1_only_server():
+    """A server that speaks only v1 (the mock without v2 mode); the C# exe offers v2, so it is not one."""
+    mock = MockCameraServer(port=0, fps=20)
     mock.start()
     try:
         yield ServerHandle("mock", mock.port)
@@ -383,8 +401,8 @@ class TestV2Vectors:
         finally:
             client.stop()
 
-    def test_1_v1_is_negotiated_with_a_v1_server(self, server):
-        client = CameraClient(LatestFrame(), port=server.port)
+    def test_1_v1_is_negotiated_with_a_v1_server(self, v1_only_server):
+        client = CameraClient(LatestFrame(), port=v1_only_server.port)
         try:
             client.connect(timeout=_TIMEOUT)
             assert client.session_version == 1
@@ -453,6 +471,9 @@ class TestV2Vectors:
     def test_4_binning_reconfigures_the_stream_before_the_new_size_arrives(self, v2_server):
         with v2_server.connect() as sock:
             _, controls, info, _ = _handshake_v2(sock)
+            if v2_server.kind == "exe" and _exe_backend() == "ids" and "binning" not in _controls_by_id(controls):
+                # 11.4: a backend advertises only what its camera has; the IDS backend gets binning in slice S6
+                pytest.skip("the IDS backend does not advertise binning yet")
             assert _controls_by_id(controls)["binning"]["restarts_stream"] is True
             sock.sendall(encode_json_message(MSG_SET_CONTROL, {"id": "binning", "value": 2}))
             reconfiguring, frames_before = _next_stream_info(sock, "reconfiguring")
@@ -568,12 +589,14 @@ class TestCSharpServerBehavior:
         assert (image.width, image.height) == (hello["default_width"], hello["default_height"])
         assert image.size == (1280, 720)  # the sample images, not a hardcoded size
 
-    def test_hello_carries_camera_key_and_sensor_in_a_v1_session(self, exe_server):
-        """Task 7.0: the engine's profile key and the sensor size, with the protocol still v1."""
+    def test_hello_carries_camera_key_sensor_and_the_v2_offer(self, exe_server):
+        """Tasks 7.0 and 7.1: the engine's profile key, the sensor size, and the v2 offer (the base version stays 1)."""
         with exe_server.connect() as sock:
             hello, _ = _handshake(sock)
         assert hello["protocol_version"] == 1
-        assert "max_protocol_version" not in hello
+        assert hello["max_protocol_version"] == 2
+        assert hello["capabilities"]["frame_formats"] == ["JPEG"]
+        assert hello["capabilities"]["stream_info"] is True
         key = hello["camera_key"]
         assert isinstance(key, str) and key.count(":") >= 1 and key.split(":")[0] == _exe_backend()
         sensor = hello["capabilities"]["sensor"]
@@ -599,7 +622,7 @@ class TestCSharpServerBehavior:
         with exe_server.connect() as sock:
             msg_type, _ = read_message(sock)
             assert msg_type == MSG_HELLO
-            sock.sendall(encode_json_message(MSG_HELLO, {"protocol_version": 2}))
+            sock.sendall(encode_json_message(MSG_HELLO, {"protocol_version": 3}))
             msg_type, payload = read_message(sock)
             assert msg_type == MSG_ERROR
             assert b"Protocol version mismatch" in payload

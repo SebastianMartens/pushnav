@@ -43,12 +43,16 @@ public class CameraTcpServerTests
     public void NoFrameIsSentBeforeTheClientHasAnsweredHello()
     {
         using var h = ServerHarness.Start();
-        using var client = h.Connect(receiveTimeoutMs: 400);
+        using var client = h.Connect(); // generous timeout: a slow machine may take a while to start the server and send HELLO
 
         Assert.Equal(MessageType.Hello, client.Read().Type);
 
-        // The client stays silent: the server must not stream (nor send CONTROL_INFO) yet.
-        Assert.ThrowsAny<Exception>(() => client.Read());
+        // The client stays silent: the server must not stream (nor send CONTROL_INFO) yet. Only this check is short, and it
+        // must end in a timeout on a connection that is still open (a server that hung up would say "closed" instead).
+        client.SetReceiveTimeout(400);
+        var silence = Assert.Throws<DisconnectException>(() => client.Read());
+        var timeout = Assert.IsType<System.Net.Sockets.SocketException>(silence.InnerException?.InnerException);
+        Assert.Equal(System.Net.Sockets.SocketError.TimedOut, timeout.SocketErrorCode);
     }
 
     [Fact]
@@ -276,7 +280,7 @@ public class CameraTcpServerTests
         using var client = h.Connect();
         Assert.Equal(MessageType.Hello, client.Read().Type);
 
-        client.SendJson(MessageType.Hello, ProtocolJson.SerializeClientHello(new ClientHelloMessage { ProtocolVersion = 2 }));
+        client.SendJson(MessageType.Hello, ProtocolJson.SerializeClientHello(new ClientHelloMessage { ProtocolVersion = 3 }));
 
         var error = client.Read();
         Assert.Equal(MessageType.Error, error.Type);

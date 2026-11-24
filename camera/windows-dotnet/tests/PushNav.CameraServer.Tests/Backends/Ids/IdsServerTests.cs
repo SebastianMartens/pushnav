@@ -146,6 +146,55 @@ public class IdsServerTests : IDisposable
     }
 
     [Fact]
+    public void AV2SessionGetsNativeControlsWithoutTheV1CapAndAStreamInfoThatFollowsTheExposure()
+    {
+        int port = 0;
+        var listening = new ManualResetEventSlim();
+        var seams = SeamsWith(p =>
+        {
+            port = p;
+            listening.Set();
+        });
+        int code = -1;
+        var server = new Thread(() => code = CameraServerApp.Run(["--backend", "ids", "--port", "0"], new StringWriter(), new StringWriter(), CancellationToken.None, seams));
+        server.Start();
+        Assert.True(listening.Wait(TimeSpan.FromSeconds(10)), "server did not start listening");
+
+        using (var client = LoopbackClient.Connect(port))
+        {
+            var (controls, stream) = client.HandshakeV2();
+
+            // exposure, fps and gain with their native units; binning is not offered by the IDS backend yet (task 7.2)
+            Assert.Equal(new[] { "exposure", "gain", "fps" }, controls.Controls.Select(c => c.Id));
+            var exposure = controls.Controls.Single(c => c.Id == "exposure");
+            Assert.Equal("us", exposure.Unit);
+            Assert.Equal(4_000_000, exposure.Max);
+            Assert.Equal(("float", "fps"), (controls.Controls.Single(c => c.Id == "fps").Type, controls.Controls.Single(c => c.Id == "fps").Unit));
+            Assert.Equal((1, "streaming", FakeUEyeApi.Width, FakeUEyeApi.Height, 1), (stream.Generation, stream.State, stream.Width, stream.Height, stream.Binning));
+            Assert.True(stream.FrameIntervalUs > 0);
+            client.ReadUntil(MessageType.Frame);
+
+            // 3 s: beyond the v1 cap of 1.5 s, taken as it is; the frame interval in STREAM_INFO covers it (same generation)
+            client.SetControl("exposure", 3_000_000);
+            var (info, _) = client.ReadUntilStreamInfo("streaming");
+            Assert.Equal(3_000_000, client.LastControlInfo!.Controls.Single(c => c.Id == "exposure").Cur);
+            Assert.Equal(1, info.Generation);
+            Assert.InRange(info.FrameIntervalUs, 3_000_000, 4_000_000);
+            Assert.Equal(3_000_000, info.ExposureUs);
+            Assert.Equal(3000.0, _api.ExposureMs, precision: 3);
+
+            // a binning request is not a control of this camera: ignored, answered, no restart
+            client.SetControl("binning", 2);
+            client.ReadUntil(MessageType.ControlInfo);
+            Assert.DoesNotContain(client.LastControlInfo!.Controls, c => c.Id == "binning");
+        }
+
+        Assert.True(server.Join(TimeSpan.FromSeconds(10)), "server did not exit after the client left");
+        Assert.Equal(ExitCodes.Ok, code);
+        Assert.Equal(1, _api.CallCount("ExitCamera"));
+    }
+
+    [Fact]
     public void AnUnpluggedCameraTellsTheClientAndExitsWithCode1()
     {
         int port = 0;

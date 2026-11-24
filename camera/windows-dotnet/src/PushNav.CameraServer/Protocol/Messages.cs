@@ -10,10 +10,14 @@ namespace PushNav.CameraServer.Protocol;
 // null properties are omitted. Everything here is serialised through the source-generated
 // ProtocolJsonContext, so nothing needs runtime reflection (Native AOT).
 
-/// <summary>Camera -> app HELLO (SPEC_PROTOCOL_CAMERA.md 4.1).</summary>
+/// <summary>Camera -> app HELLO (SPEC_PROTOCOL_CAMERA.md 4.1 and 11.2).</summary>
 internal sealed class HelloMessage
 {
+    /// <summary>Always 1: the v1 client rejects any other value (protocol 11.2); the real maximum is <see cref="MaxProtocolVersion"/>.</summary>
     public int ProtocolVersion { get; init; } = ProtocolInfo.Version;
+
+    /// <summary>Highest protocol version the server speaks; a v1 client ignores the key.</summary>
+    public int? MaxProtocolVersion { get; init; }
 
     public string Backend { get; init; } = "";
 
@@ -35,13 +39,19 @@ internal sealed class HelloMessage
 
     public int DefaultFps { get; init; }
 
-    /// <summary>Features of the opened camera that do not change during the session (protocol 11.3); only <c>sensor</c> so far.</summary>
+    /// <summary>Features of the opened camera that do not change during the session (protocol 11.3).</summary>
     public HelloCapabilities? Capabilities { get; init; }
 }
 
 /// <summary>HELLO <c>capabilities</c> (SPEC_PROTOCOL_CAMERA.md 11.3). Unknown keys are ignored by clients.</summary>
 internal sealed class HelloCapabilities
 {
+    /// <summary>Formats the server can send; <c>"JPEG"</c> is mandatory (<c>"GRAY8"</c> would mean FRAME_RAW).</summary>
+    public List<string>? FrameFormats { get; init; }
+
+    /// <summary><c>true</c>: the server sends STREAM_INFO in a v2 session.</summary>
+    public bool? StreamInfo { get; init; }
+
     public HelloSensor? Sensor { get; init; }
 }
 
@@ -115,10 +125,58 @@ internal sealed class SetControlMessage
     public double? Value { get; init; }
 }
 
+/// <summary>STREAM_INFO payload (protocol 11.5): what the frames that follow look like.</summary>
+internal sealed class StreamInfoMessage
+{
+    /// <summary>1 at the start of the session, +1 after every reconfiguration.</summary>
+    public int Generation { get; init; }
+
+    /// <summary><c>"streaming"</c> or <c>"reconfiguring"</c> (the stream restarts; the size is still the old one).</summary>
+    public string State { get; init; } = StreamStates.Streaming;
+
+    public int Width { get; init; }
+
+    public int Height { get; init; }
+
+    public int Binning { get; init; }
+
+    public string FrameFormat { get; init; } = FrameFormats.Jpeg;
+
+    /// <summary>Time between frames; the client derives its stall timeout from it.</summary>
+    public long FrameIntervalUs { get; init; }
+
+    public long ExposureUs { get; init; }
+}
+
+internal static class StreamStates
+{
+    public const string Streaming = "streaming";
+    public const string Reconfiguring = "reconfiguring";
+}
+
+internal static class FrameFormats
+{
+    public const string Jpeg = "JPEG";
+}
+
+/// <summary>SET_STREAM_CONFIG payload (protocol 11.6).</summary>
+internal sealed class SetStreamConfigMessage
+{
+    public string? FrameFormat { get; init; }
+}
+
 internal static class ProtocolInfo
 {
-    /// <summary>Wire protocol version spoken by this build (must match data/VERSION.json and the Python client).</summary>
+    /// <summary>The <c>protocol_version</c> a server HELLO carries, and the version of a v1 session (must match the Python client's minimum).</summary>
     public const int Version = 1;
+
+    /// <summary>Lowest client version a session accepts.</summary>
+    public const int MinVersion = 1;
+
+    /// <summary>Highest version this build speaks (<c>max_protocol_version</c>; data/VERSION.json says the same for the whole release).</summary>
+    public const int MaxVersion = 2;
+
+    public static bool IsSupported(int clientVersion) => clientVersion is >= MinVersion and <= MaxVersion;
 }
 
 [JsonSourceGenerationOptions(
@@ -129,6 +187,8 @@ internal static class ProtocolInfo
 [JsonSerializable(typeof(ClientHelloMessage))]
 [JsonSerializable(typeof(ControlInfoMessage))]
 [JsonSerializable(typeof(SetControlMessage))]
+[JsonSerializable(typeof(StreamInfoMessage))]
+[JsonSerializable(typeof(SetStreamConfigMessage))]
 internal sealed partial class ProtocolJsonContext : JsonSerializerContext
 {
 }
@@ -141,6 +201,18 @@ internal static class ProtocolJson
 
     public static byte[] Serialize(ControlInfoMessage info) =>
         JsonSerializer.SerializeToUtf8Bytes(info, ProtocolJsonContext.Default.ControlInfoMessage);
+
+    public static byte[] Serialize(StreamInfoMessage info) =>
+        JsonSerializer.SerializeToUtf8Bytes(info, ProtocolJsonContext.Default.StreamInfoMessage);
+
+    public static StreamInfoMessage? ParseStreamInfo(ReadOnlySpan<byte> payload) =>
+        TryParse(payload, ProtocolJsonContext.Default.StreamInfoMessage);
+
+    public static SetStreamConfigMessage? ParseSetStreamConfig(ReadOnlySpan<byte> payload) =>
+        TryParse(payload, ProtocolJsonContext.Default.SetStreamConfigMessage);
+
+    public static byte[] SerializeSetStreamConfig(SetStreamConfigMessage message) =>
+        JsonSerializer.SerializeToUtf8Bytes(message, ProtocolJsonContext.Default.SetStreamConfigMessage);
 
     public static HelloMessage? ParseHello(ReadOnlySpan<byte> payload) =>
         TryParse(payload, ProtocolJsonContext.Default.HelloMessage);

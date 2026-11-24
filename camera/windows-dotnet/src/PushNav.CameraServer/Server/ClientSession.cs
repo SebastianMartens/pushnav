@@ -18,16 +18,19 @@ internal enum SessionOutcome
     /// <summary>The client broke the protocol (bad HELLO, version mismatch, oversize message): exit code 1.</summary>
     ProtocolViolation,
 
+    /// <summary>The backend could not restart the stream for a v2 reconfiguration: the client got an ERROR, exit code 1.</summary>
+    BackendFailure,
+
     /// <summary>The server stopped the session (Ctrl+C, fatal backend error).</summary>
     Stopped,
 }
 
 /// <summary>
-/// One client connection (protocol v1): HELLO exchange, CONTROL_INFO, then FRAMEs from the
-/// <see cref="LatestFrameSlot"/> while SET_CONTROL / GET_CONTROLS are answered on the reading thread.
+/// One client connection: HELLO exchange (which picks protocol v1 or v2, see <see cref="IProtocolDialect"/>), CONTROL_INFO,
+/// then FRAMEs from the <see cref="LatestFrameSlot"/> while SET_CONTROL / GET_CONTROLS are answered on the reading thread.
 /// Unknown message types after the handshake are ignored. All socket writes share one lock.
 /// </summary>
-internal sealed class ClientSession
+internal sealed class ClientSession : ISessionChannel
 {
     /// <summary>How long a client may take to answer HELLO before the session is dropped.</summary>
     public static readonly TimeSpan DefaultHandshakeTimeout = TimeSpan.FromSeconds(10);
@@ -39,6 +42,7 @@ internal sealed class ClientSession
     private readonly TimeSpan _handshakeTimeout;
     private readonly object _writeLock = new();
     private NetworkStream? _stream;
+    private IProtocolDialect? _dialect; // chosen by the handshake
     private bool _ended; // guarded by _writeLock (written after the final ERROR, also at session end)
 
     public ClientSession(Socket socket, ICameraBackend backend, LatestFrameSlot slot, Logger log, TimeSpan? handshakeTimeout = null)
@@ -67,7 +71,16 @@ internal sealed class ClientSession
                 return handshake.Value;
             }
 
-            SendControlInfo();
+            try
+            {
+                Dialect.SendInitial();
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or SocketException)
+            {
+                _log.Info($"Client went away right after the handshake: {ex.Message}");
+                return SessionOutcome.Disconnected;
+            }
+
             _slot.Clear(); // never start with a frame from before the client connected
 
             writer = new Thread(() => WriterLoop(sessionCts.Token))
@@ -166,12 +179,13 @@ internal sealed class ClientSession
 
         // A missing protocol_version is read as 1 (the C server never looked at the payload at all).
         int clientVersion = clientHello.ProtocolVersion ?? ProtocolInfo.Version;
-        if (clientVersion != ProtocolInfo.Version)
+        if (!ProtocolInfo.IsSupported(clientVersion))
         {
-            return Violation($"Protocol version mismatch: client={clientVersion}, server={ProtocolInfo.Version}");
+            return Violation($"Protocol version mismatch: client={clientVersion}, server={ProtocolInfo.MinVersion}..{ProtocolInfo.MaxVersion}");
         }
 
-        _log.Info($"Client HELLO ok (app={clientHello.App ?? "?"} {clientHello.AppVersion ?? string.Empty}, protocol {clientVersion})");
+        _dialect = clientVersion == 1 ? new V1Dialect(_backend, this, _log) : new V2Dialect(_backend, this, _log);
+        _log.Info($"Client HELLO ok (app={clientHello.App ?? "?"} {clientHello.AppVersion ?? string.Empty}, protocol {_dialect.Version})");
         return null;
     }
 
@@ -189,6 +203,7 @@ internal sealed class ClientSession
         {
             Backend = backend.HelloName,
             BackendVersion = BackendVersion,
+            MaxProtocolVersion = ProtocolInfo.MaxVersion,
             CameraModel = backend.Device.Model,
             // Extras for every session (spec 11.2 / task 7.0): a v1 client ignores unknown HELLO keys, and the
             // engine keys its per-camera profile on camera_key from the first connect on.
@@ -198,17 +213,19 @@ internal sealed class ClientSession
             DefaultWidth = geometry.Width,
             DefaultHeight = geometry.Height,
             DefaultFps = backend.DefaultFps,
-            Capabilities = SensorCapabilities(backend.Sensor),
+            Capabilities = new HelloCapabilities
+            {
+                FrameFormats = [FrameFormats.Jpeg], // GRAY8 / FRAME_RAW is optional (task 7.3) and not offered
+                StreamInfo = true,
+                Sensor = SensorOf(backend.Sensor),
+            },
         };
     }
 
-    private static HelloCapabilities? SensorCapabilities(SensorInfo? sensor) =>
+    private static HelloSensor? SensorOf(SensorInfo? sensor) =>
         sensor == null
             ? null
-            : new HelloCapabilities
-            {
-                Sensor = new HelloSensor { Width = sensor.Width, Height = sensor.Height, PixelSizeUm = sensor.PixelSizeUm, Mono = sensor.Mono },
-            };
+            : new HelloSensor { Width = sensor.Width, Height = sensor.Height, PixelSizeUm = sensor.PixelSizeUm, Mono = sensor.Mono };
 
     /// <summary>Assembly version as <c>major.minor.build</c> (HELLO <c>backend_version</c>).</summary>
     internal static string BackendVersion { get; } = ReadBackendVersion();
@@ -259,6 +276,14 @@ internal sealed class ClientSession
                 _log.Info($"Client disconnected while sending: {ex.Message}");
                 return SessionOutcome.Disconnected;
             }
+            catch (StreamRestartFailedException ex)
+            {
+                // The stream could not be restarted: nobody knows what state the camera is in (protocol 11.5: ERROR, exit 1).
+                // Nothing else a control change throws ends the session: a refused control is a ControlResult.
+                _log.Error(ex.Message);
+                SendFinalError(ex.Message);
+                return SessionOutcome.BackendFailure;
+            }
         }
     }
 
@@ -271,7 +296,11 @@ internal sealed class ClientSession
                 break;
 
             case MessageType.GetControls:
-                SendControlInfo();
+                Dialect.SendControlInfo();
+                break;
+
+            case MessageType.SetStreamConfig:
+                Dialect.HandleSetStreamConfig(message.Payload);
                 break;
 
             case MessageType.Hello:
@@ -294,38 +323,7 @@ internal sealed class ClientSession
             return; // like the C server: an unparseable command gets no reply
         }
 
-        if (V1ControlAdapter.IsExposedInV1(command.Id) && V1ControlAdapter.TryToNative(command.Id, command.Value.Value, out double native))
-        {
-            try
-            {
-                var result = _backend.SetControl(command.Id, native);
-                if (!result.Accepted)
-                {
-                    _log.Debug($"SET_CONTROL {command.Id}={command.Value} rejected: {result.Message}");
-                }
-                else
-                {
-                    _log.Debug($"Set {command.Id} = {command.Value}");
-                }
-            }
-            catch (CameraException ex)
-            {
-                _log.Warn($"SET_CONTROL {command.Id} failed: {ex.Message}");
-            }
-        }
-        else
-        {
-            _log.Debug($"Unknown control: {command.Id}");
-        }
-
-        // Always answer with the applied state, even if nothing changed (spec 5.1: CONTROL_INFO after every SET_CONTROL).
-        SendControlInfo();
-    }
-
-    private void SendControlInfo()
-    {
-        var info = V1ControlAdapter.Project(_backend.Controls);
-        Send(MessageType.ControlInfo, ProtocolJson.Serialize(info));
+        Dialect.HandleSetControl(command.Id, command.Value.Value);
     }
 
     private void WriterLoop(CancellationToken token)
@@ -350,7 +348,11 @@ internal sealed class ClientSession
                             return; // a final ERROR went out; nothing may follow it
                         }
 
-                        _stream!.Write(frame.Data, 0, frame.WireLength);
+                        // A v2 stream only carries frames that match what STREAM_INFO announced last; others are dropped.
+                        if (Dialect.AdmitFrame(frame.Geometry))
+                        {
+                            _stream!.Write(frame.Data, 0, frame.WireLength);
+                        }
                     }
                 }
                 finally
@@ -367,6 +369,26 @@ internal sealed class ClientSession
             }
 
             CloseQuietly(_socket); // wakes the reader, which ends the session
+        }
+    }
+
+    private IProtocolDialect Dialect => _dialect ?? throw new InvalidOperationException("Handshake not finished");
+
+    void ISessionChannel.Send(uint type, byte[] payload) => Send(type, payload);
+
+    void ISessionChannel.SendIfAny(uint type, Func<byte[]?> build)
+    {
+        lock (_writeLock)
+        {
+            if (_ended)
+            {
+                return; // the session is over (final ERROR sent or closing)
+            }
+
+            if (build() is { } payload)
+            {
+                Send(type, payload); // the lock is reentrant
+            }
         }
     }
 

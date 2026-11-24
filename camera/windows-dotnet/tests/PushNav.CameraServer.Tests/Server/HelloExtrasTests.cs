@@ -12,8 +12,9 @@ using PushNav.CameraServer.Tests.Backends.Ids;
 namespace PushNav.CameraServer.Tests.Server;
 
 /// <summary>
-/// Task 7.0: HELLO carries <c>camera_key</c>, <c>camera_serial</c> and <c>capabilities.sensor</c> in every session,
-/// with the protocol version still 1 (SPEC_PROTOCOL_CAMERA.md 11.2 / 11.3, SPEC_CAMERA_CONTROLS.md 4.2).
+/// Tasks 7.0 and 7.1: HELLO carries <c>camera_key</c>, <c>camera_serial</c> and <c>capabilities</c> in every session, and offers
+/// protocol v2 with <c>max_protocol_version</c> while <c>protocol_version</c> stays 1 (SPEC_PROTOCOL_CAMERA.md 11.2 / 11.3,
+/// SPEC_CAMERA_CONTROLS.md 4.2).
 /// </summary>
 public class HelloExtrasTests
 {
@@ -33,21 +34,29 @@ public class HelloExtrasTests
             DefaultWidth = 1936,
             DefaultHeight = 1216,
             DefaultFps = 10,
-            Capabilities = new HelloCapabilities { Sensor = new HelloSensor { Width = 1936, Height = 1216, PixelSizeUm = 5.86, Mono = true } },
+            MaxProtocolVersion = 2,
+            Capabilities = new HelloCapabilities
+            {
+                FrameFormats = ["JPEG"],
+                StreamInfo = true,
+                Sensor = new HelloSensor { Width = 1936, Height = 1216, PixelSizeUm = 5.86, Mono = true },
+            },
         };
 
         var root = JsonDocument.Parse(ProtocolJson.Serialize(hello)).RootElement;
 
         Assert.Equal(
-            ["protocol_version", "backend", "backend_version", "camera_model", "camera_key", "camera_serial", "stream_format", "default_width", "default_height", "default_fps", "capabilities"],
+            ["protocol_version", "max_protocol_version", "backend", "backend_version", "camera_model", "camera_key", "camera_serial", "stream_format", "default_width", "default_height", "default_fps", "capabilities"],
             root.EnumerateObject().Select(p => p.Name));
         Assert.Equal(1, root.GetProperty("protocol_version").GetInt32());
-        Assert.False(root.TryGetProperty("max_protocol_version", out _)); // v2 is a later task
+        Assert.Equal(2, root.GetProperty("max_protocol_version").GetInt32());
         Assert.Equal("ids:1409:3060", root.GetProperty("camera_key").GetString());
         Assert.Equal("4102825084", root.GetProperty("camera_serial").GetString());
 
         var capabilities = root.GetProperty("capabilities");
-        Assert.Equal(["sensor"], capabilities.EnumerateObject().Select(p => p.Name));
+        Assert.Equal(["frame_formats", "stream_info", "sensor"], capabilities.EnumerateObject().Select(p => p.Name));
+        Assert.Equal(["JPEG"], capabilities.GetProperty("frame_formats").EnumerateArray().Select(f => f.GetString()));
+        Assert.True(capabilities.GetProperty("stream_info").GetBoolean());
         var sensor = capabilities.GetProperty("sensor");
         Assert.Equal(["width", "height", "pixel_size_um", "mono"], sensor.EnumerateObject().Select(p => p.Name));
         Assert.Equal(1936, sensor.GetProperty("width").GetInt32());
@@ -83,7 +92,7 @@ public class HelloExtrasTests
     }
 
     [Fact]
-    public void ABackendWithoutSensorFactsSendsNoCapabilities()
+    public void ABackendWithoutSensorFactsStillOffersTheV2Capabilities()
     {
         using var backend = new StubBackend();
         backend.Open(backend.Probe()[0]);
@@ -91,9 +100,12 @@ public class HelloExtrasTests
         var root = Hello(backend);
 
         Assert.Equal("stub:1234:abcd", root.GetProperty("camera_key").GetString()); // vid:pid in hex
-        Assert.False(root.TryGetProperty("capabilities", out _));
         Assert.False(root.TryGetProperty("camera_serial", out _));
-        Assert.False(root.TryGetProperty("max_protocol_version", out _));
+        Assert.Equal(2, root.GetProperty("max_protocol_version").GetInt32());
+        var capabilities = root.GetProperty("capabilities");
+        Assert.False(capabilities.TryGetProperty("sensor", out _));
+        Assert.Equal(["JPEG"], capabilities.GetProperty("frame_formats").EnumerateArray().Select(f => f.GetString()));
+        Assert.True(capabilities.GetProperty("stream_info").GetBoolean());
     }
 
     [Fact]
@@ -132,7 +144,7 @@ public class HelloExtrasTests
     }
 
     [Fact]
-    public void ASessionSendsTheExtrasInAV1Hello()
+    public void ASessionSendsTheExtrasAndOffersV2WithoutChangingTheBaseVersion()
     {
         using var h = ServerHarness.Start();
         using var client = h.Connect();
@@ -143,7 +155,7 @@ public class HelloExtrasTests
         var root = JsonDocument.Parse(hello.Payload).RootElement;
         Assert.Equal(1, root.GetProperty("protocol_version").GetInt32());
         Assert.Equal("stub:1234:abcd", root.GetProperty("camera_key").GetString());
-        Assert.False(root.TryGetProperty("max_protocol_version", out _));
+        Assert.Equal(2, root.GetProperty("max_protocol_version").GetInt32());
 
         // A v1 client answers as before and gets exactly the v1 session.
         client.SendJson(MessageType.Hello, ProtocolJson.SerializeClientHello(new ClientHelloMessage { ProtocolVersion = 1, App = "evf", AppVersion = "0.2.1" }));
