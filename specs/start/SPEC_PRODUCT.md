@@ -32,10 +32,12 @@ This system acts as a real-time electronic encoder replacement using plate solvi
 - Single supported UVC camera model
 - No camera selection UI
 - No multiple camera support
-- Window size is **1060 × 820** (HiDPI-scaled by each platform's webview)
-  and **non-resizable** (`resizable=False` in `webview.create_window()`).
-  The React layout is designed around this single size; no fluid /
-  responsive scaling is expected on the desktop window.
+- Default window size is **1060 × 820** (HiDPI-scaled by each platform's webview).
+  Fork: the window is **resizable** (`resizable=True`) down to a minimum of
+  **800 × 600** (`min_size` in `webview.create_window()`), so the user can
+  fit it beside other applications. Upstream had it non-resizable. The React
+  layout is responsive (it is also served to phones): taller windows give
+  the content more height, below 1024 px width the What to See tab stacks.
 
 ## 2.2 Functional Capabilities
 

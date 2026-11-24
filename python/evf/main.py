@@ -39,15 +39,19 @@ from evf.engine.engine import Engine
 
 logger = logging.getLogger(__name__)
 
-# Window dimensions sized to the React UI's `max-w-5xl` (1024px) layout
-# plus minimal padding. The window is non-resizable (see `resizable=False`
-# in create_window below) so the layout never has to deal with arbitrary
-# aspect ratios — the dome, controls and panels are all designed around
-# this single size.
+# Default window dimensions, sized to the React UI's `max-w-5xl` (1024px) layout
+# plus minimal padding.
+# fork: the window is resizable (upstream fixed it at this size, so the page
+# scrolled whenever content was taller than the window). The layout is
+# responsive (it is also served to phones), so `_VP_MIN_*` only keeps it above
+# the Tailwind `md` breakpoint (768px): the three-column navigation layout
+# stays instead of collapsing into the stacked phone layout.
 # Each platform's webview (WKWebView / WebKit2GTK / WebView2) handles HiDPI
 # scaling natively against its OS's DPI/scale settings — no app-side multiplier.
 _VP_WIDTH = 1060
 _VP_HEIGHT = 820
+_VP_MIN_WIDTH = 800
+_VP_MIN_HEIGHT = 600
 
 
 def _vite_running(port: int = 5173) -> bool:
@@ -255,7 +259,8 @@ def main() -> None:
         target_url,
         width=_VP_WIDTH,
         height=_VP_HEIGHT,
-        resizable=False,
+        resizable=True,  # fork: was False
+        min_size=(_VP_MIN_WIDTH, _VP_MIN_HEIGHT),
         background_color="#0D0A0B",
     )
     # Linux/QtWebEngine flashes white on startup despite background_color above:
