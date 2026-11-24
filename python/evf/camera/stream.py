@@ -21,7 +21,7 @@ import logging
 import math
 import struct
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 from PIL import Image
@@ -80,7 +80,10 @@ class StreamInfo:
 
     ``reconfiguring_since`` (``time.monotonic()``) is when the current reconfiguration
     began, None for a stream that is not reconfiguring: stall detection waits for a
-    reconfiguration only for a limited time.
+    reconfiguration only for a limited time. ``generation_since`` is when this
+    ``generation`` was first announced (on the same clock as a frame's timestamp, so a
+    frame is of this generation if it is newer); None for an info that did not come from
+    ``parse_stream_info``.
     """
 
     generation: int
@@ -92,6 +95,7 @@ class StreamInfo:
     frame_interval_us: int | None = None
     exposure_us: int | None = None
     reconfiguring_since: float | None = None
+    generation_since: float | None = field(default=None, compare=False)
 
     @property
     def geometry(self) -> StreamGeometry:
@@ -156,6 +160,9 @@ def parse_stream_info(payload: bytes, previous: StreamInfo | None, now: float) -
         reconfiguring_since = now
         if previous is not None and previous.reconfiguring and previous.generation == generation:
             reconfiguring_since = previous.reconfiguring_since  # the same reconfiguration, not a new one
+    generation_since = now
+    if previous is not None and previous.generation == generation and previous.generation_since is not None:
+        generation_since = previous.generation_since  # the same generation, announced earlier
     return StreamInfo(
         generation=generation,
         state=state,
@@ -166,6 +173,7 @@ def parse_stream_info(payload: bytes, previous: StreamInfo | None, now: float) -
         frame_interval_us=interval,
         exposure_us=exposure,
         reconfiguring_since=reconfiguring_since,
+        generation_since=generation_since,
     )
 
 
@@ -275,6 +283,57 @@ def stall_since_last_activity(
             and now - info.reconfiguring_since <= RECONFIGURE_GRACE_S):
         return 0.0, timeout
     return now - last_activity, timeout
+
+
+class StreamStatus:
+    """What ``/ws`` shows of the camera session (spec 6.1): ``connected``, ``protocol_version``, ``stream``.
+
+    A new generation clears the frame buffer (spec 3.2), so until the first frame of the new
+    size arrives the buffer is empty and the camera would read as lost. For that gap (at most
+    ``RECONFIGURE_GRACE_S`` after the generation was announced) ``stream.state`` reads
+    ``"reconfiguring"`` instead of the announced ``"streaming"``, and ``connected`` stays true:
+    the UI shows "Reconfiguring camera" and not a lost camera.
+
+    The gap is derived from the client's own STREAM_INFO (``generation_since``) and the frame's
+    timestamp, so it does not depend on the order in which the receiver thread updates the
+    info, clears the buffer and sets the first frame, and ``poll()`` holds no state of its own
+    to get out of step. Generation 1 is the first of a session, not a reconfiguration.
+    """
+
+    def __init__(self, frame_buffer) -> None:
+        self._frame_buffer = frame_buffer
+
+    def poll(self, client, now: float) -> dict:
+        """``{"connected", "protocol_version", "stream"}`` for the ``camera`` block.
+
+        ``connected`` is whether a frame is in the buffer, or the stream is reconfiguring.
+        ``stream`` is None in a v1 session; both it and ``protocol_version`` are None without a
+        connected client.
+        """
+        # The buffer first, the info second: the receiver thread updates the info before it clears
+        # the buffer, so an info read after the buffer is never older than what the buffer showed
+        # (the other order could pair the old info with the cleared buffer: a lost camera).
+        jpeg, frame_time, _frame_id = self._frame_buffer.get()
+        has_frame = jpeg is not None
+        if client is None or not client.connected:
+            return {"connected": has_frame, "protocol_version": None, "stream": None}
+        info = client.stream_info if client.session_version >= 2 else None
+        if info is None:
+            return {"connected": has_frame, "protocol_version": client.session_version, "stream": None}
+        stream = info.to_dict()
+        since = info.generation_since
+        # A frame is of this generation if it arrived at or after the announcement. ">=", not ">":
+        # time.monotonic() ticks every 15.6 ms on Windows, so the first new frame can share the
+        # announcement's tick; an old frame in that tick is cleared right after the announcement.
+        has_current_frame = has_frame and (since is None or frame_time >= since)
+        if (info.generation > 1 and not has_current_frame
+                and since is not None and now - since <= RECONFIGURE_GRACE_S):
+            stream["state"] = STATE_RECONFIGURING
+        return {
+            "connected": has_frame or stream["state"] == STATE_RECONFIGURING,
+            "protocol_version": client.session_version,
+            "stream": stream,
+        }
 
 
 class GeometryTracker:

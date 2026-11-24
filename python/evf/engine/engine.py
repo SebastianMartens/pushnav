@@ -43,7 +43,8 @@ from evf.engine.status_led import StatusLedController, find_leds
 from evf.solver.solver import PlateSolver
 # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
 from evf.engine.camera_profile import CameraProfile
-from evf.camera.controls import remember_control, restore_controls
+from evf.camera.controls import capped_controls, remember_control, restore_controls, validate_control_request
+from evf.camera.stream import StreamStatus
 import numpy as np
 
 from evf.solver.sync import (
@@ -153,6 +154,7 @@ class Engine:
         self._camera_profile = CameraProfile(
             self._config, self._frame_buffer, lambda: self._solver
         )
+        self._stream_status = StreamStatus(self._frame_buffer)
 
         # Components (created during startup)
         self._solver: PlateSolver | None = None
@@ -244,8 +246,13 @@ class Engine:
     def camera_controls(self) -> list[dict] | None:
         """Return the current camera controls, or None if not connected."""
         if self._subprocess_mgr and self._subprocess_mgr.client:
-            return self._subprocess_mgr.client.controls
+            return capped_controls(self._subprocess_mgr.client.controls, self._config.get("camera", "max_exposure_us"))  # fork: camera-controls (spec 4.1)
         return None
+
+    def camera_stream(self) -> dict:  # fork: camera-controls (spec 6.1)
+        """``connected``, ``protocol_version`` and ``stream`` of the camera block in ``/ws``."""
+        client = self._subprocess_mgr.client if self._subprocess_mgr else None
+        return self._stream_status.poll(client, time.monotonic())
 
     @property
     def consecutive_failures(self) -> int:
@@ -537,6 +544,7 @@ class Engine:
                 server_errors=lambda: self.server_errors,
                 camera_controls=lambda: self.camera_controls,
                 camera_geometry=self._camera_profile.geometry_payload,  # fork: camera-controls
+                camera_stream=self.camera_stream,  # fork: camera-controls
                 sync_state=lambda: {
                     "in_progress": self.sync_in_progress,
                     "candidates": [
@@ -933,6 +941,9 @@ class Engine:
     def set_control(self, control_id: str, value: int | float) -> None:
         """Send a camera control change and persist to config."""
         client = self._subprocess_mgr.client if self._subprocess_mgr else None
+        advertised = self.camera_controls  # fork: camera-controls (spec 6.1)
+        if advertised:  # fork: camera-controls: check against what the camera offers; nothing offered (no camera, recovery): as before
+            value = validate_control_request(advertised, control_id, value)  # fork: camera-controls
         sent = client.set_control(control_id, value) if client else False
         # Persist to config: the camera profile, and in a v1 session the legacy keys too
         remember_control(self._config, client, control_id, value, sent)  # fork: camera-controls (spec 4.2)

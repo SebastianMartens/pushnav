@@ -34,6 +34,7 @@ from aiohttp import WSCloseCode, web
 
 from evf.config.manager import ConfigManager
 # fork: camera-controls (see specs/camera-server/SPEC_CAMERA_CONTROLS.md)
+from evf.camera.controls import ControlRequestError
 from evf.engine.camera_profile import FovRequestError, NoCameraConnected
 from evf.engine.frame_buffer import LatestFrame
 from evf.engine.goto_target import GotoTarget
@@ -70,6 +71,8 @@ _NO_CAMERA_INFO = {
     "camera_model": None, "backend": None, "camera_key": None,
     "sensor_width_mm": None, "focal_length_mm": None,
 }
+# fork: camera-controls: protocol_version and stream of the camera block while there is no provider
+_NO_STREAM = {"protocol_version": None, "stream": None}
 
 
 def _default_geometry() -> dict:
@@ -191,6 +194,7 @@ class WebServer:
         server_errors: Callable[[], list[dict]] | None = None,
         camera_controls: Callable[[], list[dict] | None] | None = None,
         camera_geometry: Callable[[], dict] | None = None,  # fork: camera-controls
+        camera_stream: Callable[[], dict] | None = None,  # fork: camera-controls
         sync_state: Callable[[], dict] | None = None,
         activity: Callable[[], dict] | None = None,
         stellarium_location: Callable[[], dict | None] | None = None,
@@ -210,6 +214,7 @@ class WebServer:
         self._server_errors = server_errors
         self._camera_controls = camera_controls
         self._camera_geometry = camera_geometry  # fork: camera-controls
+        self._camera_stream = camera_stream  # fork: camera-controls
         self._sync_state = sync_state
         self._activity = activity
         self._stellarium_location = stellarium_location
@@ -304,7 +309,7 @@ class WebServer:
         app.router.add_post("/api/calibration/use-previous", self._api_use_previous_calibration)
         app.router.add_post("/api/camera/retry", self._api_camera_retry)
         app.router.add_post("/api/camera/fov", self._api_camera_fov)  # fork: camera-controls
-        app.router.add_post("/api/control", self._api_set_control)
+        app.router.add_post("/api/control", self._api_camera_control)  # fork: camera-controls (was _api_set_control)
         app.router.add_post("/api/goto/clear", self._api_goto_clear)
         app.router.add_post("/api/goto/set", self._api_goto_set)
         app.router.add_post("/api/settings", self._api_settings)
@@ -554,6 +559,32 @@ class WebServer:
             return web.Response(status=500, text=str(exc))
         return web.json_response(result)
 
+    async def _api_camera_control(self, request: web.Request) -> web.Response:
+        """fork: camera-controls (spec 6.1). Set a control; ``value`` is a JSON number (int or float).
+
+        The engine checks the id and the enum options against the camera's descriptors and
+        clamps a number to the range: 400 for a request it cannot take, 204 otherwise.
+        """
+        if self._actions is None:
+            return web.Response(status=503, text="No actions wired")
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or not isinstance(body.get("name"), str):
+            return web.Response(status=400, text='Expected {"name": <id>, "value": <number>}')
+        value = body.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return web.Response(status=400, text='"value" must be a number')
+        try:
+            await asyncio.to_thread(lambda: self._actions.set_control(body["name"], value))
+        except ControlRequestError as exc:
+            return web.Response(status=400, text=str(exc))
+        except Exception as exc:
+            logger.exception("set_control failed: %s", exc)
+            return web.Response(status=500, text=str(exc))
+        return web.Response(status=204)
+
     async def _api_set_control(self, request):
         body = await request.json()
         name = str(body["name"])
@@ -679,8 +710,10 @@ class WebServer:
             "in_progress": False, "candidates": [], "selected_idx": None, "error": None,
         }
         activity_blk = self._activity() if self._activity else {}
+        session = self._camera_stream() if self._camera_stream else _NO_STREAM  # fork: camera-controls
         camera_blk = {
             "connected": True if (self._frame_buffer and self._frame_buffer.get()[0]) else False,
+            **session,  # fork: camera-controls (spec 6.1): protocol_version, stream; connected, true while reconfiguring
             "all_centroids": snap.all_centroids if snap.valid else None,
             "matched_centroids": snap.matched_centroids if snap.valid else None,
             # fork: camera-controls: camera_model, backend, camera_key, sensor_width_mm, focal_length_mm

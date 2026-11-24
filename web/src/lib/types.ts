@@ -95,6 +95,10 @@ export interface CameraBlock {
   sensor_width_mm?: number | null;
   /** Focal length behind the current FOV (user or learned), when the sensor size is known. */
   focal_length_mm?: number | null;
+  // fork: camera-controls (spec 6.1). Protocol version of the session (1, 2; null: no camera) and,
+  // in a v2 session, the frames now arriving; null in a v1 session. Absent from older engines.
+  protocol_version?: number | null;
+  stream?: import("./cameraControlTypes").CameraStream | null;
 }
 
 /** How the FOV was set; "searching" while the FOV search runs (spec 5.4.4), "default" = legacy 8.86°. */

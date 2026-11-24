@@ -20,6 +20,10 @@ value from the first of these that applies (spec 4.2):
 
 ``remember_control()`` is the save side, called by ``Engine.set_control()``.
 
+``validate_control_request()`` checks what the UI sends (``POST /api/control``, slice S4) against
+the descriptors the camera advertises, and ``capped_controls()`` applies the engine's
+``camera.max_exposure_us`` cap to the descriptors the UI sees (spec 4.1, 6.1).
+
 A v1 session restores only ``exposure`` and ``gain``: it behaves as it did before the profiles.
 ``ControlDescriptor`` is the CONTROL_INFO entry parsed once, at the edge, so the rules
 (type coercion, valid enum options, first-run value) live in one place.
@@ -43,6 +47,10 @@ logger = logging.getLogger(__name__)
 RESTORE_ORDER = ("binning", "fps", "exposure", "gain")
 # What a v1 session has, and the only controls with a legacy config key.
 V1_CONTROLS = ("exposure", "gain")
+
+
+class ControlRequestError(ValueError):
+    """The UI asked for a control change the camera cannot take (HTTP 400)."""
 
 
 class ValueSource(enum.Enum):
@@ -111,6 +119,16 @@ class ControlDescriptor:
             return float(value)
         return int(round(value))
 
+    def clamp(self, value: Any) -> Any:
+        """``value`` limited to ``[min, max]``, as this control's type (an enum has no range: its options are the check).
+
+        The bound's own type must not leak: an int exposure clamped to a float cap stays an int,
+        a float fps clamped to an int maximum stays a float.
+        """
+        if self.type == "enum" or not (_is_number(self.min) and _is_number(self.max)):
+            return value
+        return self.coerce(min(max(value, self.min), self.max))
+
     def default_value(self) -> Any | None:
         """The descriptor's own ``default`` if it is a valid value, else None."""
         return self.coerce(self.default)
@@ -131,6 +149,50 @@ class ControlDescriptor:
         """What a control gets when nothing is saved: ``default``, else the midpoint."""
         default = self.default_value()
         return default if default is not None else self.midpoint()
+
+
+def validate_control_request(infos: list, control_id: object, value: object) -> Any:
+    """The value to send for a UI request, or ``ControlRequestError`` (spec 6.1).
+
+    ``infos`` are the descriptors the UI currently sees. An id the camera does not advertise,
+    a value that is not a number and an enum value that is not one of its options are rejected.
+    A number outside ``[min, max]`` is clamped, as the camera would: the ranges are coupled (fps
+    moves the exposure maximum), so a slider can commit against a range that has just moved, and
+    ``infos`` hold the ``camera.max_exposure_us`` cap, which this keeps enforced. A valid value
+    comes back as the control's own type: ``int`` rounds, ``float`` converts, an enum gives the
+    option's value.
+    """
+    descriptor = next((d for d in _descriptors(infos) if d.id == control_id), None)
+    if descriptor is None:
+        raise ControlRequestError(f"Unknown control: {control_id!r}")
+    coerced = descriptor.coerce(value)
+    if coerced is None:
+        if descriptor.type == "enum":
+            raise ControlRequestError(f"{descriptor.id}: {value!r} is not one of {list(descriptor.options)}")
+        raise ControlRequestError(f"{descriptor.id}: {value!r} is not a number")
+    return descriptor.clamp(coerced)
+
+
+def capped_controls(infos: list[dict], max_exposure_us: object) -> list[dict]:
+    """The descriptors for the UI with ``exposure.max`` limited to ``camera.max_exposure_us`` (spec 4.1).
+
+    Only a v2 exposure (``"unit": "us"``) is capped; a v1 exposure is in the server's own unit
+    and the server caps it itself. A cap that is not a positive number, or that would drop below
+    ``min``, changes nothing. The camera's own list is not modified.
+    """
+    if not _is_number(max_exposure_us) or max_exposure_us <= 0:
+        return infos
+    return [
+        {**info, "max": max_exposure_us} if _exposure_above_cap(info, max_exposure_us) else info
+        for info in infos
+    ]
+
+
+def _exposure_above_cap(info: object, cap: float) -> bool:
+    """True for a v2 exposure descriptor whose ``max`` is above ``cap`` (and whose ``min`` is not)."""
+    return (isinstance(info, dict) and info.get("id") == "exposure" and info.get("unit") == "us"
+            and _is_number(info.get("max")) and info["max"] > cap
+            and (not _is_number(info.get("min")) or info["min"] <= cap))
 
 
 def restore_controls(client, config: ConfigManager) -> list[tuple[str, Any]]:

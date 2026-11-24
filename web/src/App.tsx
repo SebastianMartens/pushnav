@@ -3,6 +3,7 @@ import { useEngineState } from "@/hooks/useEngineState";
 import { useView } from "@/hooks/useView";
 import { LiveView } from "@/components/live-view/LiveView";
 import { CameraControls } from "@/components/controls/CameraControls";
+import { CameraControlsV2 } from "@/components/controls/CameraControlsV2"; // fork: camera-controls
 import { Wizard } from "@/components/wizard/Wizard";
 import { Settings } from "@/components/settings/Settings";
 import { Connectivity } from "@/components/settings/Connectivity";
@@ -65,7 +66,8 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex flex-col gap-2">
-                  <CameraControls controls={state.controls} />
+                  {/* fork: camera-controls: a protocol v2 camera has its own controls */}
+                  {state.camera.protocol_version === 2 ? <CameraControlsV2 controls={state.controls} stream={state.camera.stream} /> : <CameraControls controls={state.controls} />}
                   <Connectivity state={state} />
                   <Settings
                     state={state}
