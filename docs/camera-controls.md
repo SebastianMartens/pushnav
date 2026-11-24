@@ -12,7 +12,7 @@ so the card looks different for different cameras:
 
 | Camera | What the card shows |
 |---|---|
-| IDS UI-306xCP-M (C# camera server) | exposure up to 4 s, frame rate, gain, binning 1x1 / 2x2 |
+| IDS UI-306xCP-M (C# camera server) | exposure up to 4 s, frame rate, gain, binning (1x1 and 2x2 expected; the card shows what the camera reports) |
 | OV9281 module and the other cameras (C, Linux, macOS camera servers) | exposure and gain, as before |
 
 Your settings are saved **per camera model** and restored the next time that camera connects.
@@ -55,7 +55,7 @@ Beyond about 1 s the sensor switches to its **long-exposure mode**. In that mode
 regulates the frame rate (a frame lasts as long as the exposure), so the **Frame rate** slider is
 locked and shows the rate the camera really runs at. The binning cannot be changed either.
 
-When you bring the exposure back below about 1 s, the camera leaves long-exposure mode. Leaving it
+When you bring the exposure back to about 1 s or less, the camera leaves long-exposure mode. Leaving it
 takes a few seconds in which no picture arrives; the card shows **Reconfiguring camera…** for that time
 and PushNav does not treat it as a failure. Afterwards the frame rate slider works again.
 

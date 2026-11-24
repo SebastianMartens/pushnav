@@ -72,7 +72,7 @@ PushNav also works with **IDS uEye** industrial cameras on Windows. The model it
 **How it behaves**
 
 - The camera runs in 8-bit mono with all automatic exposure, gain and frame-rate features switched off. Frames are sent to the app as grayscale JPEG, about 10 frames per second at the default settings.
-- **Exposure** appears in the app in the same units as for the OV9281 (steps of 0.1 ms, 0.1 ms to 1.5 s). A longer exposure lowers the frame rate by itself so the frame always fits. Beyond about 1 s the sensor switches to its long-exposure mode and stays there until the camera server restarts (leaving that mode would interrupt the picture for about 2.5 s); shorter exposures are still accepted in that mode. (That is how an older camera-server protocol behaves; the app's current controls, frame rate, binning and leaving long-exposure mode, are described in [Camera controls](camera-controls.md).)
+- **Controls:** exposure up to 4 s, frame rate, gain and binning, with the frame rate following the exposure by itself and long exposures switching the sensor into its long-exposure mode. All of it is described in [Camera controls](camera-controls.md). (An app that speaks only the older camera protocol, v1, shows exposure in 0.1 ms steps up to 1.5 s and never leaves long-exposure mode.)
 - **Gain** is the sensor's master gain, 0 to 100.
 - If the camera is unplugged the camera server stops and the app keeps trying to reconnect for a minute or more. If the camera is back only after that, use the app's *Retry camera* button.
 
