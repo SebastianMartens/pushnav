@@ -1,7 +1,7 @@
 # SPEC_CAMERA_SERVER_WINDOWS.md — PushNav
 
 Version: 1.3 (2026-11-18: status after PRs #9, #10, #14; task 7 (v2) detailed and scheduled in `SPEC_CAMERA_CONTROLS.md` §10.8; Q2, Q5 resolved. 1.2: C server kept permanently side by side, server selection, upstream minimal-diff rules; 1.1: 25 mm reference lens, wide-field solver database)
-Status: Approved (PR #8). Tasks 1–6 mostly implemented (PRs #9, #10, #14, #15; open: 6.7 (optional); 5.6, 5.9 and 6.8 done on 2026-11-24; 6.6 done and the `workflow_dispatch` build green; 6.2a not planned); task 7 (protocol v2): 7.0 done (S1b), 7.1 onwards open; task 8 (UVC) not planned
+Status: Approved (PR #8). Issue #1 closed on 2026-11-24. Tasks 1–6 done (PRs #9, #10, #14, #15; 5.6, 5.9 and 6.8 on 2026-11-24); 6.7 optional, 6.2a not planned. Task 7 (protocol v2): 7.0 done (S1b); 7.1–7.3 open and tracked under #3 (`SPEC_CAMERA_CONTROLS.md` §10.8). Task 8 (UVC) not planned
 Date: 2026-11-18
 Target: Windows 10/11 x64
 Issue: SebastianMartens/pushnav#1 (IDS uEye UI-306xCP-M support)
@@ -810,8 +810,10 @@ camera. **[INFRA]** = route to the infra agent.
 
 ### 7. Protocol v2 in the server (#3 approved in PR #8)
 
-Scheduled in the slices of `SPEC_CAMERA_CONTROLS.md` §10.8: 7.0 in S1,
-7.1–7.2 in S5, 7.3 optional after that.
+From 2026-11-24 these tasks are tracked under issue #3 (#1 is closed):
+`SPEC_CAMERA_CONTROLS.md` §10.8 schedules 7.0 in S1 (done), 7.1 in S5 and
+7.2 in S6; 7.3 is optional and not scheduled. The checkboxes stay here and
+are ticked when S5 and S6 merge.
 
 - [x] 7.0 HELLO extras in **every** session, no version change: `camera_key` (`DeviceInfo.CameraKey`, e.g. `ids:1409:3060`), `camera_serial` when known, `capabilities.sensor` (`width`, `height`, `pixel_size_um`, `mono`; IDS from the sensor info, 5.86 µm on the UI-306xCP-M; Fake: the IDS values). No `max_protocol_version` yet. A v1 client ignores unknown HELLO keys (protocol §11.2), so this is safe before v2 exists, and it fixes the engine's profile key early (`SPEC_CAMERA_CONTROLS.md` §4.2). Test: xUnit on the HELLO JSON; conformance v1 suite unchanged and green against the exe. *(Done in S1b: `HelloMessage` gained `camera_key` (`DeviceInfo.CameraKey`), `camera_serial` and `capabilities.sensor`; `ICameraBackend.Sensor` (default null = no capabilities) is implemented by the IDS backend (`is_GetSensorInfo`: width, height, pixel pitch nm -> µm, mono) and the fake backend (IDS values, whatever the replayed images measure). `protocol_version` stays 1 and there is no `max_protocol_version`. xUnit: `Server/HelloExtrasTests.cs`; `tests/test_camera_conformance.py` has one exe-only check of the new keys, and the v1 suite is green against the mock and the Native AOT exe.)*
 - [ ] 7.1 v2 handshake and session (Fake backend first): HELLO `max_protocol_version: 2`, `capabilities.frame_formats` / `stream_info: true`; accept a client `protocol_version` of 1 or 2 (`ProtocolInfo` gets min/max; anything else stays an ERROR). In a v2 session: CONTROL_INFO with the backend's native descriptors (`exposure` in µs up to the backend cap of 4 s, **no** 1.5 s v1 cap; `fps`; `gain` raw; `binning` where supported), CONTROL_INFO with all ranges after every SET_CONTROL, STREAM_INFO (generation 1) after the first CONTROL_INFO, STREAM_INFO again (same generation) when `frame_interval_us` changes, and `reconfiguring` → `streaming` (generation + 1) around a binning change before the first frame of the new size. v1 sessions stay exactly as today (`V1ControlAdapter`). Test: xUnit (session, Fake binning); `tests/test_camera_conformance.py` v2 vectors 1–5 against the exe with `--backend fake`.
