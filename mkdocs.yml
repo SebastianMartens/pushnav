@@ -47,6 +47,7 @@ nav:
   - Stellarium Setup: stellarium-setup.md
   - SkySafari & Other Apps: skysafari-setup.md
   - Using PushNav: using-pushnav.md
+  - Camera controls: camera-controls.md  # fork: exposure, frame rate, gain, binning
   - Architecture diagrams: architecture.md  # fork: architecture diagrams (docs/architecture/)
   - License: license.md
   - Questions & Feedback: https://github.com/meridianfield/pushnav/issues

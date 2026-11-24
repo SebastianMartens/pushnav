@@ -3,9 +3,9 @@
 Document version: 3.0
 Protocol version (wire): **1** — must match `data/VERSION.json.protocol_version`
 and `PROTOCOL_VERSION` in `python/evf/camera/client.py`, `camera/mac/Sources/.../main.swift`, and the Linux/Windows camera servers.
-Protocol version (wire) **2**: Draft — specified in §11, not yet implemented
-(issue #3). v2 is negotiated on top of v1 and keeps every v1 peer working.
-Status: §1–§10 Reflect Current Implementation (v1); §11 Draft (v2)
+Protocol version (wire) **2**: specified in §11, implemented (issue #3; GRAY8 / FRAME_RAW is
+optional and no server offers it yet). v2 is negotiated on top of v1 and keeps every v1 peer working.
+Status: §1–§10 Reflect Current Implementation (v1); §11 Implemented (v2)
 Date: 2026-11-18 (v2 draft); 2026-04-20 (v1 text)
 Transport: TCP on localhost
 Applies to: macOS (Swift), Linux (C/V4L2), Windows (C/DirectShow) — all v1;
@@ -298,11 +298,14 @@ Key classes in the backend:
 
 ---
 
-## 11. Protocol v2 (Draft — issue #3)
+## 11. Protocol v2 (issue #3)
 
-Status: Approved (PR #8). The Python engine (client, liveness, control
+Status: **Implemented** (approved in PR #8). The Python engine (client, liveness, control
 restore) and the Python mock implement §11 since slice S3; the Windows C# server
-implements it since slice S5 (the Fake backend, and IDS without binning). The order of work is the slice plan in
+implements it since slice S5 (the Fake backend, and IDS with exposure, fps and gain) and slice S6
+(IDS binning, and leaving long-exposure mode inside `reconfiguring` → `streaming`). Not implemented by
+any server: GRAY8 / FRAME_RAW (§11.6), which stays optional (`SPEC_CAMERA_SERVER_WINDOWS.md` task 7.3).
+The order of work was the slice plan in
 `SPEC_CAMERA_CONTROLS.md` §10.8. The C# server already sends its real stream
 size in HELLO (v1).
 Engine/config/UI side: `specs/camera-server/SPEC_CAMERA_CONTROLS.md`.
@@ -560,5 +563,6 @@ Python mock and, when available, real servers.
 
 | Doc version | Date | Change |
 |---|---|---|
+| 3.1 | 2026-11-24 | §11 status: implemented (engine and mock S3, C# server S5 and S6); header lines follow. |
 | 3.0 | 2026-11-18 | (Also: the Windows C server stays v1 permanently beside the C# server.) Added §11 protocol v2 draft (capability handshake, µs exposure, fps/binning controls, coupling, STREAM_INFO, FRAME_RAW, SET_STREAM_CONFIG, adaptive stall timeout). §1–§10 (v1) unchanged except header and cross-references. |
 | 2.1 | 2026-04-20 | Editorial updates; wire protocol v1 unchanged. |

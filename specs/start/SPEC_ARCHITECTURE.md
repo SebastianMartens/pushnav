@@ -254,6 +254,13 @@ Protected by threading.Lock.
 Only one frame stored.
 Overwritten on each new frame.
 
+Fork (`specs/camera-server/SPEC_CAMERA_CONTROLS.md` §5.1): the size of the frame in the buffer is not
+fixed. The **stream geometry** (width, height, binning, generation, `evf/camera/stream.py`) is
+HELLO `default_width` x `default_height` in a v1 camera session, corrected by the first decoded frame,
+and the latest STREAM_INFO in a v2 session. When STREAM_INFO announces a new `generation` (binning
+change, leaving the IDS long-exposure mode) the buffer is cleared, so a frame of the old size is never
+solved against the new geometry, and the solver drops a result whose image size no longer matches.
+
 ---
 
 ## 5.2 Pointing State
@@ -405,6 +412,13 @@ Backoff schedule:
 1s, 2s, 4s, 8s, 15s
 
 Frame stall detection: if no frames received for 2.0s, treat as stalled.
+
+Fork (`SPEC_CAMERA_CONTROLS.md` §3.3, `SPEC_PROTOCOL_CAMERA.md` §11.7): that timeout is for a v1 camera
+session. In a v2 session it is `max(2.0, 2 x frame_interval + 1.0)` seconds from the latest STREAM_INFO
+(a 4 s exposure is not a stall), and stall detection is suspended for up to 5 s while STREAM_INFO says
+`"reconfiguring"`. A stream reconfiguration (a binning change, the IDS camera leaving long-exposure
+mode) is not a crash: the camera server restarts its capture in-process and keeps the TCP connection,
+so there is no RECONNECTING and no subprocess restart.
 
 If exhausted:
 - Enter ERROR state.
