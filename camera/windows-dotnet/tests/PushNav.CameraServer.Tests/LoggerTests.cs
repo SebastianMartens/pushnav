@@ -101,6 +101,60 @@ public class LoggerTests
     }
 
     [Fact]
+    public void FlushWritesTheQueuedLinesItselfWhenTheBackgroundWriterNeverRuns()
+    {
+        var sw = new StringWriter();
+        var scheduled = new List<Action>();
+        var log = new Logger(sw, LogLevel.Info, schedule: scheduled.Add); // the "pool" never runs the worker
+
+        log.Info("one");
+        log.Error("two");
+        Assert.Equal(string.Empty, sw.ToString());
+
+        Assert.True(log.Flush(TimeSpan.FromSeconds(30)));
+        Assert.Equal(["[INFO] one", "[ERROR] two"], sw.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
+
+        // The worker finally gets its turn: nothing is written a second time, and later lines still flow.
+        Assert.Single(scheduled);
+        scheduled[0]();
+        log.Info("three");
+        Assert.True(log.Flush(TimeSpan.FromSeconds(30)));
+        Assert.Equal(["[INFO] one", "[ERROR] two", "[INFO] three"], sw.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    [Fact]
+    public void FlushNeverOvertakesALineTheWorkerIsWriting()
+    {
+        var sink = new BlockedWriter();
+        var log = new Logger(sink, LogLevel.Info);
+        log.Info("first");
+        Assert.True(sink.Entered.Wait(TimeSpan.FromSeconds(5))); // the worker is stuck inside the write of "first"
+        log.Info("second");
+
+        Assert.False(log.Flush(TimeSpan.FromMilliseconds(100))); // gives up; no second writer, no reordering
+        Assert.Empty(sink.Lines);
+
+        sink.Release();
+        Assert.True(log.Flush(TimeSpan.FromSeconds(30)));
+        Assert.Equal(["[INFO] first", "[INFO] second"], sink.Lines);
+    }
+
+    [Fact]
+    public void FlushWithAStuckWriterAndNothingInFlightStillReturnsAfterItsTimeout()
+    {
+        var sink = new BlockedWriter();
+        var scheduled = new List<Action>();
+        var log = new Logger(sink, LogLevel.Info, schedule: scheduled.Add);
+        log.Info("fatal");
+
+        Assert.False(log.Flush(TimeSpan.FromMilliseconds(100))); // the takeover thread is stuck on the sink, the caller is not
+
+        sink.Release();
+        Assert.True(log.Flush(TimeSpan.FromSeconds(30)));
+        Assert.Equal(["[INFO] fatal"], sink.Lines);
+    }
+
+    [Fact]
     public void FlushReturnsAtOnceWhenNothingIsPending()
     {
         var log = new Logger(TextWriter.Null, LogLevel.Info);
