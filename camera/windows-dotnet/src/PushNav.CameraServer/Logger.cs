@@ -102,7 +102,22 @@ internal sealed class Logger
 
         if (takeOver)
         {
-            new Thread(WriteQueued) { IsBackground = true, Name = "log-flush" }.Start();
+            try
+            {
+                new Thread(WriteQueued) { IsBackground = true, Name = "log-flush" }.Start();
+            }
+            catch (Exception)
+            {
+                // No thread to write with (out of memory, thread limit): hand the writer back so a later Flush or the
+                // pool worker can still drain, and tell the caller its lines are not out.
+                lock (_gate)
+                {
+                    _writing = false;
+                    Monitor.PulseAll(_gate);
+                }
+
+                return false;
+            }
         }
 
         lock (_gate)

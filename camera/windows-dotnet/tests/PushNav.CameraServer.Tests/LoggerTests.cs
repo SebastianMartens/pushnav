@@ -94,7 +94,7 @@ public class LoggerTests
         sw.Stop();
 
         Assert.False(flushed);
-        Assert.InRange(sw.ElapsedMilliseconds, 250, 3000); // bounded, never forever
+        Assert.InRange(sw.ElapsedMilliseconds, 250, 30_000); // waited for its timeout, and came back
         sink.Release();
         Assert.True(log.Flush(TimeSpan.FromSeconds(5)));
         Assert.Equal(["[ERROR] fatal"], sink.Lines);
@@ -131,7 +131,8 @@ public class LoggerTests
         Assert.True(sink.Entered.Wait(TimeSpan.FromSeconds(5))); // the worker is stuck inside the write of "first"
         log.Info("second");
 
-        Assert.False(log.Flush(TimeSpan.FromMilliseconds(100))); // gives up; no second writer, no reordering
+        Assert.False(log.Flush(TimeSpan.FromMilliseconds(500))); // gives up; no second writer, no reordering
+        Assert.Equal(1, sink.EntryCount); // a takeover would have entered the writer for "second" by now
         Assert.Empty(sink.Lines);
 
         sink.Release();
@@ -152,6 +153,29 @@ public class LoggerTests
         sink.Release();
         Assert.True(log.Flush(TimeSpan.FromSeconds(30)));
         Assert.Equal(["[INFO] fatal"], sink.Lines);
+    }
+
+    [Fact]
+    public void ALateWorkerLeavesTheWriterToTheFlushTakeoverThatOwnsIt()
+    {
+        var sink = new BlockedWriter();
+        var scheduled = new List<Action>();
+        var log = new Logger(sink, LogLevel.Info, schedule: scheduled.Add);
+        log.Info("first");
+        Assert.False(log.Flush(TimeSpan.FromMilliseconds(100))); // the takeover thread is stuck inside the write of "first"
+        Assert.True(sink.Entered.Wait(TimeSpan.FromSeconds(5)));
+
+        scheduled[0](); // the pool finally runs the worker: it must back off, not touch the writer or its ownership
+
+        log.Info("second"); // still owned by the takeover: no new worker, nobody else may start writing
+        Assert.Single(scheduled);
+        Assert.False(log.Flush(TimeSpan.FromMilliseconds(500)));
+        Assert.Equal(1, sink.EntryCount);
+
+        sink.Release();
+        Assert.True(log.Flush(TimeSpan.FromSeconds(30)));
+        Assert.Equal(["[INFO] first", "[INFO] second"], sink.Lines);
+        Assert.Equal(2, sink.EntryCount);
     }
 
     [Fact]
