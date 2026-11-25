@@ -433,7 +433,7 @@ The engine side is in `SPEC_CAMERA_CONTROLS.md` §5.
 
 **Time.** The 500 ms is a budget for the fake API (`FakeUEyeApi`: the backend's own work, thread stop and
 start, rebuilding the timing table). On the real camera the target is the protocol's: §11.5 says a
-reconfiguration SHOULD complete within 2 s, and the engine waits 5 s (`SPEC_CAMERA_CONTROLS.md` §3.3).
+reconfiguration SHOULD complete within 2 s, and the engine waits 5 s (`SPEC_CAMERA_CONTROLS.md` §3.3). Confirmed by Sebastian on 2026-11-25.
 
 As built (S6, `IdsBackend.ChangeBinningLocked`): join the capture thread and `is_StopLiveVideo`, then
 `is_ExitImageQueue`, `is_ClearSequence`, free the buffers, `is_SetBinning`, read the new size
