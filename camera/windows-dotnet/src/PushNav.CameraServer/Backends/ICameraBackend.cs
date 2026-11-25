@@ -135,6 +135,12 @@ internal interface ICameraBackend : IDisposable
     /// Applies a control change (clamped and rounded per the protocol); may change other controls or the geometry. It restarts the
     /// stream only when <see cref="WouldRestartStream"/> says so for the same <paramref name="change"/>, which implies
     /// <see cref="ControlChange.MayRestartStream"/>: the caller has announced the restart.
+    /// <para>
+    /// <b>A change that restarts the stream returns only once the first frame after the restart has been captured</b>, or after a
+    /// bounded wait (a backend picks about 2 s and logs a warning, it does not fail). The caller announces STREAM_INFO
+    /// <c>streaming</c> when this returns, so whatever gap follows the restart must fall inside <c>reconfiguring</c>, where the
+    /// engine waits 5 s, and not after <c>streaming</c>, where its stall timeout is only 2 s.
+    /// </para>
     /// </summary>
     ControlResult SetControl(ControlChange change);
 

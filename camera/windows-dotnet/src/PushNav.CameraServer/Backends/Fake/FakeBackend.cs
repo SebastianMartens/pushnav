@@ -41,6 +41,7 @@ internal sealed class FakeBackend : ICameraBackend
     private readonly object _gate = new();      // guards the simulated control state
     private readonly object _streamLock = new(); // held while a frame is produced / the geometry changes
     private readonly ManualResetEventSlim _wake = new(false);
+    private readonly ManualResetEventSlim _frameSincePublished = new(false); // set by the capture loop after each frame
 
     private List<GrayImage> _images = [];
     private readonly Dictionary<int, List<GrayImage>> _binned = [];
@@ -53,6 +54,9 @@ internal sealed class FakeBackend : ICameraBackend
     private Thread? _thread;
     private volatile bool _stopping;
     private long _framesProduced;
+
+    /// <summary>How long a restart waits for the first frame after it (the contract of <see cref="ICameraBackend.SetControl"/>).</summary>
+    internal TimeSpan FirstFrameTimeout { get; init; } = TimeSpan.FromSeconds(2);
 
     public FakeBackend(string? imagesDirectory, int jpegQuality, Logger log)
     {
@@ -134,13 +138,36 @@ internal sealed class FakeBackend : ICameraBackend
         if (id == ControlIds.Binning)
         {
             // Binning restarts the stream: wait for the frame in flight, so no frame of the old size follows.
+            ControlResult result;
             lock (_streamLock)
             {
                 lock (_gate)
                 {
-                    return ApplyLocked(id, value);
+                    result = ApplyLocked(id, value);
+                }
+
+                _frameSincePublished.Reset(); // any frame published from here on is made under the new binning
+            }
+
+            // Contract of SetControl: a restart returns once the first frame after it has been captured, so the caller announces
+            // "streaming" only when frames flow. The capture loop is woken (again and again: a wake that lands while it is
+            // still pacing the previous frame is reset) so that does not take a whole frame interval.
+            if (result.Accepted && _thread != null)
+            {
+                var waited = Stopwatch.StartNew();
+                do
+                {
+                    _wake.Set();
+                }
+                while (!_frameSincePublished.Wait(20) && waited.Elapsed < FirstFrameTimeout);
+
+                if (!_frameSincePublished.IsSet)
+                {
+                    _log.Warn($"No frame within {FirstFrameTimeout.TotalSeconds:0.#} s after changing the binning; carrying on");
                 }
             }
+
+            return result;
         }
 
         lock (_gate)
@@ -404,6 +431,7 @@ internal sealed class FakeBackend : ICameraBackend
 
                     _sink!.OnFrame(jpeg.AsSpan(0, n), FrameKind.Jpeg, geometry);
                     Interlocked.Increment(ref _framesProduced);
+                    _frameSincePublished.Set();
                     index++;
                 }
 

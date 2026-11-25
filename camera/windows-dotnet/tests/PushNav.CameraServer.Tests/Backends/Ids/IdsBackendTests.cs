@@ -839,22 +839,31 @@ public class IdsBackendTests : IDisposable
         Assert.True(sink.WaitForFrames(mark + 3), "frames did not resume after leaving long mode");
     }
 
-    [Fact]
-    public async Task LeavingLongExposureModeReturnsOnlyAfterTheFirstFrameFollowingTheRestart()
+    [Theory]
+    [InlineData(false)] // leaving long-exposure mode
+    [InlineData(true)]  // a binning change
+    public async Task ARestartReturnsOnlyAfterTheFirstFrameFollowingIt(bool binning)
     {
-        // The gap after the switch (about a second on the real camera) must fall inside "reconfiguring": the caller announces
-        // "streaming" when SetControl returns. The fake holds back every frame until the gate opens; the call cannot return before.
+        // The gap after a restart (about a second after leaving long mode, a frame after a binning change) must fall inside
+        // "reconfiguring": the caller announces "streaming" when SetControl returns. The fake holds back every frame until the gate
+        // opens; the call cannot return before.
         using var gate = new ManualResetEventSlim();
         var backend = CreateBackendWithFirstFrameTimeout(TimeSpan.FromSeconds(60), minimumFrameTimeoutMs: 60_000, new Logger(TextWriter.Null, LogLevel.Debug));
         var sink = new CollectingSink();
         backend.Start(sink);
         Assert.True(sink.WaitForFrames(1));
-        backend.SetControl(ControlIds.Exposure, 1_200_000);
+        if (!binning)
+        {
+            backend.SetControl(ControlIds.Exposure, 1_200_000); // long-exposure mode on
+        }
+
         _api.FrameGate = gate;
         int startsBefore = _api.CallCount("StartCapture");
         int framesBefore = sink.Count;
 
-        var leaving = Task.Run(() => backend.SetControlMayRestart(ControlIds.Exposure, 30_000));
+        var leaving = Task.Run(() => binning
+            ? backend.SetControlMayRestart(ControlIds.Binning, 2)
+            : backend.SetControlMayRestart(ControlIds.Exposure, 30_000));
         // The old capture thread is joined before the capture starts again, so a wait that finds the gate closed after that
         // is the new capture thread asking for its first frame.
         Assert.True(SpinWait.SpinUntil(() => _api.CallCount("StartCapture") > startsBefore, TimeSpan.FromSeconds(10)), "the capture was not restarted");
@@ -865,6 +874,10 @@ public class IdsBackendTests : IDisposable
         var result = await leaving.WaitAsync(TimeSpan.FromSeconds(20)); // times out with an exception if SetControl never returns
         Assert.True(result.Accepted);
         Assert.True(sink.Count > framesBefore, "no frame was captured when the call returned");
+        if (binning)
+        {
+            Assert.Equal(2, sink.Snapshot()[^1].Geometry.Binning); // and it is one of the new size
+        }
     }
 
     [Fact]
@@ -886,6 +899,7 @@ public class IdsBackendTests : IDisposable
         Assert.Empty(fatal);
         log.Flush(TimeSpan.FromSeconds(5));
         Assert.Contains("No frame within", written.ToString());
+        Assert.Contains("carrying on", written.ToString());
         gate.Set();
     }
 

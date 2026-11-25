@@ -237,6 +237,23 @@ public class FakeBackendTests
     }
 
     [Fact]
+    public void ABinningChangeReturnsOnlyOnceAFrameOfTheNewSizeHasBeenCaptured()
+    {
+        // The contract of SetControl: the caller announces "streaming" when it returns, so frames must be flowing by then.
+        // A 3 s exposure makes the frame interval 3 s: without waking the capture loop this would wait a whole interval.
+        using var backend = OpenedSynthetic();
+        backend.SetControl("exposure", 3_000_000);
+        var sink = new CollectingSink();
+        backend.Start(sink);
+        Assert.True(sink.WaitForFrames(1));
+
+        Assert.True(backend.SetControlMayRestart("binning", 2).Accepted);
+
+        Assert.Equal(2, sink.Snapshot()[^1].Geometry.Binning);
+        backend.Stop();
+    }
+
+    [Fact]
     public void ABinningChangeIsRefusedForACallerThatCannotAnnounceTheRestart()
     {
         using var backend = OpenedSynthetic();

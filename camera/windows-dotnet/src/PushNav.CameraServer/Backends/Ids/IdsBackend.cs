@@ -87,7 +87,7 @@ internal sealed class IdsBackend : ICameraBackend
     private double _preferredFps = DefaultFpsValue;
     private double _effectiveFps = DefaultFpsValue;
     private bool _longActive;
-    private StreamGeometry _geometry;    // width, height, binning of the frames now; default (width 0) while closed. Replaced whole by PublishGeometryLocked
+    private StreamGeometry _geometry;    // width, height, binning of the frames now; default (width 0) while closed. Written (replaced whole, PublishGeometryLocked) under _ctl and _state; read under either
 
     // -- threads -----------------------------------------------------------------------------------------
     private IFrameSink? _sink;
@@ -97,7 +97,7 @@ internal sealed class IdsBackend : ICameraBackend
     private volatile bool _watcherStop;
     private int _fatalRaised;
     private long _framesProduced;
-    private readonly ManualResetEventSlim _firstFrame = new(false); // set by the capture thread after each frame; reset before a restart
+    private readonly ManualResetEventSlim _frameCapturedSinceRestart = new(false); // set by the capture thread after each frame; reset before a restart
 
     private readonly record struct ImageBuffer(nint Memory, int Id, int Pitch);
 
@@ -124,7 +124,11 @@ internal sealed class IdsBackend : ICameraBackend
         return new IdsBackend(api, jpegQuality, log);
     }
 
-    /// <summary>How long a restart that gaps the stream (leaving long-exposure mode) waits for the first frame afterwards, so the gap falls inside <c>reconfiguring</c>.</summary>
+    /// <summary>
+    /// How long a restart waits for the first frame after it (<see cref="ICameraBackend.SetControl"/>), so the gap falls inside
+    /// <c>reconfiguring</c>. 2 s because the engine grants 5 s while <c>reconfiguring</c> (<c>RECONFIGURE_GRACE_S</c>), the switch out of
+    /// long-exposure mode takes about 1.1 s (spec 5.6), and the rest is margin.
+    /// </summary>
     internal TimeSpan FirstFrameTimeout { get; init; } = TimeSpan.FromSeconds(2);
 
     /// <summary>Shortest wait before an empty wait counts as a timeout (spec 5.2: 1 s; tests shorten it).</summary>
@@ -166,17 +170,6 @@ internal sealed class IdsBackend : ICameraBackend
             lock (_state)
             {
                 return _geometry.Width == 0 ? throw new InvalidOperationException("Backend not opened") : _geometry;
-            }
-        }
-    }
-
-    private int CurrentBinning
-    {
-        get
-        {
-            lock (_state)
-            {
-                return _geometry.Binning;
             }
         }
     }
@@ -465,9 +458,17 @@ internal sealed class IdsBackend : ICameraBackend
                 return ControlResult.Rejected($"value {value} not accepted for '{id}'");
             }
 
-            if (id == ControlIds.Binning && BinningRefusalLocked(change, coerced) is { } refusal)
+            if (id == ControlIds.Binning)
             {
-                return ControlResult.Rejected(refusal);
+                if (!ChangesBinning(coerced))
+                {
+                    return ControlResult.Ok; // already there: nothing to restart
+                }
+
+                if (BinningRefusalLocked(change, coerced) is { } refusal)
+                {
+                    return ControlResult.Rejected(refusal);
+                }
             }
 
             var timer = Stopwatch.StartNew();
@@ -482,11 +483,6 @@ internal sealed class IdsBackend : ICameraBackend
                     break;
 
                 case ControlIds.Binning:
-                    if ((int)coerced == _geometry.Binning)
-                    {
-                        return ControlResult.Ok; // already there: nothing to restart
-                    }
-
                     var result = ChangeBinningLocked((int)coerced);
                     _log.Debug($"SET {id} = {coerced:0.###} took {timer.ElapsedMilliseconds} ms");
                     return result;
@@ -550,7 +546,7 @@ internal sealed class IdsBackend : ICameraBackend
         switch (change.Id)
         {
             case ControlIds.Binning:
-                return (int)coerced != _geometry.Binning && BinningRefusalLocked(change, coerced) == null ? RestartKind.Binning : RestartKind.None;
+                return ChangesBinning(coerced) && BinningRefusalLocked(change, coerced) == null ? RestartKind.Binning : RestartKind.None;
 
             case ControlIds.Exposure:
                 return change.MayRestartStream && _longEnabled && !IdsTimingPolicy.NeedsLongExposure(coerced / 1000.0, _normalMaxAtFloorMs)
@@ -563,17 +559,12 @@ internal sealed class IdsBackend : ICameraBackend
     }
 
     /// <summary>
-    /// Why a binning change to <paramref name="coerced"/> is refused, or null when it is allowed (or no change). Long-exposure mode comes
-    /// first, because that is what the user can act on: the frame timing is measured in normal mode, and leaving the mode before a
+    /// Why a binning change to <paramref name="coerced"/> is refused, or null when it is allowed; the caller has checked that it is a
+    /// change (<see cref="ChangesBinning"/>). Long-exposure mode comes first, because that is what the user can act on: the frame timing is measured in normal mode, and leaving the mode before a
     /// restart and entering it after would stretch it past what the engine waits.
     /// </summary>
     private string? BinningRefusalLocked(ControlChange change, double coerced)
     {
-        if ((int)coerced == _geometry.Binning)
-        {
-            return null;
-        }
-
         if (_longEnabled)
         {
             return "binning cannot change while long-exposure mode is on (lower the exposure to the normal range first)";
@@ -581,6 +572,8 @@ internal sealed class IdsBackend : ICameraBackend
 
         return change.MayRestartStream ? null : "binning restarts the stream, which this session cannot announce";
     }
+
+    private bool ChangesBinning(double coerced) => (int)coerced != _geometry.Binning;
 
     private double CurrentPreferredFps()
     {
@@ -763,7 +756,7 @@ internal sealed class IdsBackend : ICameraBackend
     /// mode stays at its old binning and the stream is brought back as it was: a rejected result, not a failure.
     /// </summary>
     private ControlResult ChangeBinningLocked(int factor) =>
-        RestartStreamLocked($"binning {factor}x{factor}", waitForFirstFrame: false, () =>
+        RestartStreamLocked($"binning {factor}x{factor}", () =>
         {
             var api = _api!;
             FreeBuffersLocked();
@@ -798,7 +791,7 @@ internal sealed class IdsBackend : ICameraBackend
     /// announced the restart gets here. The camera then runs at its own frame rate again, so the preferred one is applied afresh.
     /// </summary>
     private void LeaveLongExposureLocked(double exposureUs) =>
-        RestartStreamLocked("leaving long-exposure mode", waitForFirstFrame: true, () =>
+        RestartStreamLocked("leaving long-exposure mode", () =>
         {
             Check(_api!.SetLongExposureEnabled(_camera, false), "leave long exposure");
             _longEnabled = false;
@@ -812,13 +805,13 @@ internal sealed class IdsBackend : ICameraBackend
     /// configuration is published once the restart is under way, and a new one starts afterwards (it reads the new image size).
     /// What <paramref name="change"/> returns is the result of the restart (a refused change that left the stream as it was).
     /// Failures are <see cref="CameraException"/>s; the caller, a v2 session, then ends with an ERROR (protocol 11.5).
+    /// <para>
+    /// Returns only once the first frame after the restart has been captured (at most <see cref="FirstFrameTimeout"/>; on timeout a
+    /// warning, not a failure): the contract of <see cref="ICameraBackend.SetControl"/>, so the gap after a restart (about 1 s after
+    /// leaving long-exposure mode, about one frame after a binning change) falls inside <c>reconfiguring</c>.
+    /// </para>
     /// </summary>
-    /// <param name="waitForFirstFrame">
-    /// Return only once the first frame after the restart has been captured (at most <see cref="FirstFrameTimeout"/>; on timeout a
-    /// warning, not a failure). The caller announces <c>streaming</c> when this returns, and a gap that follows it is judged by the
-    /// engine's short stall timeout instead of the 5 s it grants while <c>reconfiguring</c>.
-    /// </param>
-    private ControlResult RestartStreamLocked(string what, bool waitForFirstFrame, Func<ControlResult> change)
+    private ControlResult RestartStreamLocked(string what, Func<ControlResult> change)
     {
         var timer = Stopwatch.StartNew();
         bool capturing = StopCaptureThreadLocked();
@@ -831,12 +824,12 @@ internal sealed class IdsBackend : ICameraBackend
 
         if (capturing && !FatalRaised) // a lost camera ends the server; do not start a thread on it
         {
-            _firstFrame.Reset();
+            _frameCapturedSinceRestart.Reset();
             Check(_api!.StartCapture(_camera), "restart capture");
             StartCaptureThreadLocked();
-            if (waitForFirstFrame && !_firstFrame.Wait(FirstFrameTimeout))
+            if (!_frameCapturedSinceRestart.Wait(FirstFrameTimeout))
             {
-                _log.Warn($"No frame within {FirstFrameTimeout.TotalSeconds:0.#} s after {what}; announcing the stream anyway");
+                _log.Warn($"No frame within {FirstFrameTimeout.TotalSeconds:0.#} s after {what}; carrying on");
             }
         }
 
@@ -1022,7 +1015,7 @@ internal sealed class IdsBackend : ICameraBackend
 
                 _sink!.OnFrame(jpeg.AsSpan(0, n), FrameKind.Jpeg, geometry);
                 Interlocked.Increment(ref _framesProduced);
-                _firstFrame.Set();
+                _frameCapturedSinceRestart.Set();
             }
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
