@@ -11,10 +11,14 @@ internal sealed class BlockedWriter : TextWriter
     private readonly ManualResetEventSlim _release = new(false);
     private readonly object _gate = new();
     private readonly List<string> _lines = [];
+    private int _entries;
 
     public override Encoding Encoding => Encoding.UTF8;
 
     public ManualResetEventSlim Entered { get; } = new(false);
+
+    /// <summary>How often <see cref="WriteLine"/> was entered (also by calls still blocked inside it).</summary>
+    public int EntryCount => Volatile.Read(ref _entries);
 
     public void Release() => _release.Set();
 
@@ -31,6 +35,7 @@ internal sealed class BlockedWriter : TextWriter
 
     public override void WriteLine(string? value)
     {
+        Interlocked.Increment(ref _entries);
         Entered.Set();
         _release.Wait();
         lock (_gate)

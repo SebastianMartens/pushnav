@@ -85,6 +85,23 @@ public class CameraServerAppTests
     }
 
     [Fact]
+    public void TheLastLogLinesReachStderrEvenWhenTheBackgroundWriterNeverRuns()
+    {
+        var stderr = new StringWriter();
+        var seams = new CameraServerApp.Seams
+        {
+            Delay = _ => { },
+            BackendFactory = (o, log) => BackendRegistry.Create(o, log, () => new IdsBackend(null, o.JpegQuality, log)),
+            LogSchedule = _ => { }, // the pool never gets to run the log writer
+        };
+
+        int code = CameraServerApp.Run(["--port", "0"], new StringWriter(), stderr, CancellationToken.None, seams);
+
+        Assert.Equal(ExitCodes.NoSupportedCamera, code);
+        Assert.Contains("No supported camera found", stderr.ToString());
+    }
+
+    [Fact]
     public void ForcingTheUvcBackendThatIsNotBuiltInExitsWithCode3()
     {
         var (code, _, stderr) = Run("--backend", "uvc", "--port", "0");

@@ -26,6 +26,9 @@ internal static class CameraServerApp
 
         /// <summary>Raised once the server listens (port is known); tests use it to connect.</summary>
         public Action<int>? OnListening { get; init; }
+
+        /// <summary>Runs the logger's background drain (default: the thread pool); tests use it to starve the writer.</summary>
+        public Action<Action>? LogSchedule { get; init; }
     }
 
     public static int Run(string[] args, TextWriter stdout, TextWriter stderr, CancellationToken stop, Seams? seams = null)
@@ -48,7 +51,7 @@ internal static class CameraServerApp
             return ExitCodes.Ok;
         }
 
-        var log = new Logger(stderr, options.LogLevel);
+        var log = new Logger(stderr, options.LogLevel, schedule: seams.LogSchedule);
         var backends = seams.BackendFactory(options, log);
         try
         {
@@ -63,7 +66,8 @@ internal static class CameraServerApp
                 backend.Dispose();
             }
 
-            // Queued log lines (a fatal error, "no camera found") get a bounded chance to reach stderr before exit.
+            // Queued log lines (a fatal error, "no camera found") must reach stderr before exit. Flush writes them itself
+            // when the background writer has not run yet; the timeout only bounds a stuck pipe.
             log.Flush(TimeSpan.FromSeconds(1));
         }
     }
