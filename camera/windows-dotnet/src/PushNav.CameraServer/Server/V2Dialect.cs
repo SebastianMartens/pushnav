@@ -12,7 +12,8 @@ namespace PushNav.CameraServer.Server;
 /// binning where the camera has it), CONTROL_INFO with every range after every SET_CONTROL, and STREAM_INFO for the stream:
 /// generation 1 after the first CONTROL_INFO, the same generation again when the frame interval changes, and
 /// <c>reconfiguring</c> then <c>streaming</c> with generation + 1 around a change that restarts the stream. Which changes restart the
-/// stream is the backend's call (<see cref="ICameraBackend.RestartsStream"/>).
+/// stream is the backend's call (<see cref="ICameraBackend.WouldRestartStream"/>); a v2 session is the one that allows it
+/// (<see cref="ControlChange.MayRestartStream"/>), because it can announce it.
 /// </summary>
 internal sealed class V2Dialect : IProtocolDialect
 {
@@ -43,14 +44,17 @@ internal sealed class V2Dialect : IProtocolDialect
 
     public void HandleSetControl(string id, double value)
     {
-        if (_backend.RestartsStream(id, value))
+        // One change per request: the question and the answer are about the same object. This is the one place a
+        // session grants the permission to restart the stream; BackendControls.Set takes it away again for a change that does not.
+        var change = new ControlChange(id, value, MayRestartStream: true);
+        if (_backend.WouldRestartStream(change))
         {
-            Reconfigure(id, value);
+            Reconfigure(change);
             return;
         }
 
         // servers ignore ids they do not advertise and answer with CONTROL_INFO: the backend rejects them
-        BackendControls.Set(_backend, _log, id, value);
+        BackendControls.Set(_backend, _log, change);
         SendControlInfo();
         var timing = CurrentTiming();
         Announce(() => _announcer.TimingChanged(timing));
@@ -77,10 +81,10 @@ internal sealed class V2Dialect : IProtocolDialect
     /// generation + 1 and the new size. While it runs the writer lets no frame through, so none of the new size precedes the last
     /// STREAM_INFO and none of the old size follows it.
     /// </summary>
-    private void Reconfigure(string id, double value)
+    private void Reconfigure(ControlChange change)
     {
         Announce(() => _announcer.BeginReconfiguration());
-        var result = BackendControls.Set(_backend, _log, id, value, restartsStream: true); // throws if the restart fails
+        var result = BackendControls.SetRestartingStream(_backend, _log, change); // throws if the restart fails
         SendControlInfo();
         var geometry = _backend.Geometry;
         var timing = CurrentTiming();

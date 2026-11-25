@@ -4,6 +4,7 @@
 using System.Text.Json;
 using PushNav.CameraServer.Backends;
 using PushNav.CameraServer.Backends.Ids;
+using PushNav.CameraServer.Imaging;
 using PushNav.CameraServer.Protocol;
 
 namespace PushNav.CameraServer.Tests.Backends.Ids;
@@ -46,7 +47,7 @@ public class IdsServerTests : IDisposable
         Assert.Equal("3060", device.GetProperty("pid").GetString());
         Assert.Equal(FakeUEyeApi.Width, device.GetProperty("geometry").GetProperty("width").GetInt32());
         string?[] ids = device.GetProperty("controls").EnumerateArray().Select(c => c.GetProperty("id").GetString()).ToArray();
-        Assert.Equal(new string?[] { "exposure", "gain", "fps" }, ids);
+        Assert.Equal(new string?[] { "exposure", "gain", "fps", "binning" }, ids);
         Assert.Equal(1, _api.CallCount("ExitCamera")); // --list closes the camera again
     }
 
@@ -164,8 +165,11 @@ public class IdsServerTests : IDisposable
         {
             var (controls, stream) = client.HandshakeV2();
 
-            // exposure, fps and gain with their native units; binning is not offered by the IDS backend yet (task 7.2)
-            Assert.Equal(new[] { "exposure", "gain", "fps" }, controls.Controls.Select(c => c.Id));
+            // exposure, fps and gain with their native units, and the binning the sensor offers
+            Assert.Equal(new[] { "exposure", "gain", "fps", "binning" }, controls.Controls.Select(c => c.Id));
+            var binning = controls.Controls.Single(c => c.Id == "binning");
+            Assert.Equal(("enum", true), (binning.Type, binning.RestartsStream));
+            Assert.Equal([1d, 2d], binning.Options!.Select(o => o.Value));
             var exposure = controls.Controls.Single(c => c.Id == "exposure");
             Assert.Equal("us", exposure.Unit);
             Assert.Equal(4_000_000, exposure.Max);
@@ -182,16 +186,159 @@ public class IdsServerTests : IDisposable
             Assert.InRange(info.FrameIntervalUs, 3_000_000, 4_000_000);
             Assert.Equal(3_000_000, info.ExposureUs);
             Assert.Equal(3000.0, _api.ExposureMs, precision: 3);
-
-            // a binning request is not a control of this camera: ignored, answered, no restart
-            client.SetControl("binning", 2);
-            client.ReadUntil(MessageType.ControlInfo);
-            Assert.DoesNotContain(client.LastControlInfo!.Controls, c => c.Id == "binning");
         }
 
         Assert.True(server.Join(TimeSpan.FromSeconds(10)), "server did not exit after the client left");
         Assert.Equal(ExitCodes.Ok, code);
         Assert.Equal(1, _api.CallCount("ExitCamera"));
+    }
+
+    [Fact]
+    public void AV1ClientNeverSeesBinningAndCannotChangeItOrLeaveLongExposureMode()
+    {
+        // The camera has binning and a long-exposure mode, but a v1 client has no way to be told about a restart (its stall
+        // timeout is a fixed 2 s): it sees neither, and nothing it sends restarts the stream.
+        using var run = StartServer();
+        using var client = LoopbackClient.Connect(run.Port);
+        var info = client.Handshake();
+        Assert.DoesNotContain(info.Controls, c => c.Id == "binning");
+
+        client.SetControl("binning", 2);
+        client.ReadUntil(MessageType.ControlInfo);
+        Assert.Equal(1, _api.Binning);
+        Assert.Equal(0, _api.CallCount("SetBinning 0x3"));
+
+        client.SetControl("exposure", 100_000); // far beyond 1.5 s: capped, which needs long-exposure mode
+        client.ReadUntil(MessageType.ControlInfo);
+        Assert.True(_api.LongExposureEnabled);
+        client.SetControl("exposure", 100);      // 10 ms in v1 units: long mode stays on (sticky), no restart
+        client.ReadUntil(MessageType.ControlInfo);
+
+        Assert.True(_api.LongExposureEnabled);
+        Assert.Equal(0, _api.CallCount("SetLongExposure False"));
+        Assert.Equal(1, _api.CallCount("StartCapture")); // never restarted
+        client.ReadUntil(MessageType.Frame);
+    }
+
+    [Fact]
+    public void AV2BinningChangeIsWrappedInReconfiguringAndStreamingWithTheNewSize()
+    {
+        using var run = StartServer();
+        using var client = LoopbackClient.Connect(run.Port);
+        var (_, first) = client.HandshakeV2();
+        client.ReadUntil(MessageType.Frame);
+
+        client.SetControl("binning", 2);
+
+        var (reconfiguring, framesBefore) = client.ReadUntilStreamInfo("reconfiguring");
+        var (streaming, framesDuring) = client.ReadUntilStreamInfo("streaming");
+        var frame = client.ReadUntil(MessageType.Frame);
+        Assert.Equal((first.Generation, FakeUEyeApi.Width, FakeUEyeApi.Height), (reconfiguring.Generation, reconfiguring.Width, reconfiguring.Height));
+        Assert.Equal((first.Generation + 1, FakeUEyeApi.Width / 2, FakeUEyeApi.Height / 2, 2), (streaming.Generation, streaming.Width, streaming.Height, streaming.Binning));
+        Assert.Equal(2, client.LastControlInfo!.Controls.Single(c => c.Id == "binning").Cur);
+        using var decoder = new WicGrayDecoder();
+        foreach (var old in framesBefore.Concat(framesDuring).Where(m => m.Type == MessageType.Frame))
+        {
+            Assert.Equal(FakeUEyeApi.Width, decoder.Decode(old.Payload).Width);
+        }
+
+        var image = decoder.Decode(frame.Payload);
+        Assert.Equal((streaming.Width, streaming.Height), (image.Width, image.Height));
+        for (int i = 0; i < 5; i++)
+        {
+            Assert.Equal(streaming.Width, decoder.Decode(client.ReadUntil(MessageType.Frame).Payload).Width); // the old size never comes back
+        }
+    }
+
+    [Fact]
+    public void AV2ExposureBackIntoTheNormalRangeLeavesLongModeInsideReconfiguringAndStreamingAtTheSameSize()
+    {
+        using var run = StartServer();
+        using var client = LoopbackClient.Connect(run.Port);
+        var (controls, _) = client.HandshakeV2();
+        var fpsInNormalMode = controls.Controls.Single(c => c.Id == "fps");
+        Assert.True(fpsInNormalMode.Max > fpsInNormalMode.Min);
+
+        client.SetControl("exposure", 3_000_000); // long-exposure mode on, same generation
+        var (afterLong, _) = client.ReadUntilStreamInfo("streaming");
+        Assert.True(_api.LongExposureEnabled);
+        var fpsInLongMode = client.LastControlInfo!.Controls.Single(c => c.Id == "fps");
+        Assert.Equal(fpsInLongMode.Min, fpsInLongMode.Max); // fixed while the mode is on
+        client.SetControl("fps", 5);                         // refused: nothing restarts, nothing changes
+        client.ReadUntil(MessageType.ControlInfo);
+        Assert.Equal(0, _api.CallCount("SetLongExposure False"));
+
+        client.SetControl("exposure", 100_000);              // back into the normal range: the exit gaps the stream
+        var (reconfiguring, _) = client.ReadUntilStreamInfo("reconfiguring");
+        var (streaming, _) = client.ReadUntilStreamInfo("streaming");
+
+        Assert.Equal(afterLong.Generation, reconfiguring.Generation);
+        Assert.Equal(afterLong.Generation + 1, streaming.Generation); // the generation moves although the geometry does not
+        Assert.Equal((FakeUEyeApi.Width, FakeUEyeApi.Height, 1), (streaming.Width, streaming.Height, streaming.Binning));
+        Assert.Equal(100_000, streaming.ExposureUs);
+        Assert.Equal(1, _api.CallCount("SetLongExposure False"));
+        Assert.False(_api.LongExposureEnabled);
+        var fpsAfter = client.LastControlInfo!.Controls.Single(c => c.Id == "fps");
+        Assert.True(fpsAfter.Max > fpsAfter.Min, "fps is settable again after the exit");
+        client.ReadUntil(MessageType.Frame);
+
+        client.SetControl("fps", 5);
+        client.ReadUntil(MessageType.ControlInfo);
+        Assert.Equal(5.0, _api.FrameRate, precision: 2);
+    }
+
+    [Fact]
+    public void AV2BinningRequestWhileLongExposureModeIsOnIsAnsweredWithControlInfoOnly()
+    {
+        using var run = StartServer();
+        using var client = LoopbackClient.Connect(run.Port);
+        client.HandshakeV2();
+        client.SetControl("exposure", 3_000_000);
+        client.ReadUntilStreamInfo("streaming");
+        Assert.True(_api.LongExposureEnabled);
+
+        client.SetControl("binning", 2);
+        client.Send(MessageType.GetControls, []);
+        var seen = client.ReadThroughControlInfos(2);
+
+        Assert.DoesNotContain(MessageType.StreamInfo, seen); // nothing was announced, so nothing restarted
+        Assert.Equal(1, client.LastControlInfo!.Controls.Single(c => c.Id == "binning").Cur);
+        Assert.Equal(0, _api.CallCount("SetBinning 0x3"));
+        Assert.True(_api.LongExposureEnabled);
+    }
+
+    /// <summary>The server on the fake uEye API, on a free port; disposing the run ends the session and waits for the server.</summary>
+    private ServerRun StartServer() => new(this);
+
+    private sealed class ServerRun : IDisposable
+    {
+        private readonly Thread _server;
+        private readonly int _port;
+        private int _code = -1;
+
+        public ServerRun(IdsServerTests owner)
+        {
+            int port = 0;
+            var listening = new ManualResetEventSlim();
+            var seams = owner.SeamsWith(p =>
+            {
+                port = p;
+                listening.Set();
+            });
+            _server = new Thread(() => _code = CameraServerApp.Run(["--backend", "ids", "--port", "0"], new StringWriter(), new StringWriter(), CancellationToken.None, seams));
+            _server.Start();
+            Assert.True(listening.Wait(TimeSpan.FromSeconds(10)), "server did not start listening");
+            _port = port;
+        }
+
+        public int Port => _port;
+
+        public void Dispose()
+        {
+            // the client has gone (it is disposed first): the server ends after the session
+            Assert.True(_server.Join(TimeSpan.FromSeconds(10)), "server did not exit after the client left");
+            Assert.Equal(ExitCodes.Ok, _code);
+        }
     }
 
     [Fact]

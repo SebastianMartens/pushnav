@@ -40,7 +40,7 @@ public class BackendSelectorTests
 
         public void Open(DeviceInfo device) { }
 
-        public ControlResult SetControl(string id, double value) => ControlResult.Ok;
+        public ControlResult SetControl(ControlChange change) => ControlResult.Ok;
 
         public void Start(IFrameSink sink) { }
 

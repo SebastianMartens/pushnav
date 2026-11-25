@@ -208,7 +208,7 @@ public class V2DialectTests
         using var rig = new Rig();
         int mark = rig.StartSession();
         // say a long-exposure exit: a plain exposure change that restarts the capture at the same size
-        rig.Backend.RestartsStreamOverride = (id, _) => id == "exposure" ? true : null;
+        rig.Backend.WouldRestartStreamOverride = change => change.Id == "exposure" ? true : null;
 
         rig.Dialect.HandleSetControl("exposure", 20_000);
         rig.Dialect.HandleSetControl("gain", 60); // everything else keeps the default
@@ -221,6 +221,36 @@ public class V2DialectTests
                 "CONTROL_INFO",
             ],
             rig.Since(mark));
+    }
+
+    [Fact]
+    public void A_v2_session_allows_a_restart_only_for_the_change_it_announced()
+    {
+        using var rig = new Rig();
+        rig.StartSession();
+        rig.Backend.WouldRestartStreamOverride = change => change.Id == "exposure" ? true : null;
+
+        rig.Dialect.HandleSetControl("exposure", 20_000); // announced: reconfiguring, restart, streaming
+        rig.Dialect.HandleSetControl("gain", 60);         // not announced: the backend must not restart for it
+
+        Assert.Equal(
+            [new ControlChange("exposure", 20_000, MayRestartStream: true), new ControlChange("gain", 60, MayRestartStream: false)],
+            rig.Backend.Changes);
+    }
+
+    [Fact]
+    public void A_v1_session_never_allows_a_restart()
+    {
+        using var rig = new Rig(v2: false);
+        rig.StartSession();
+
+        rig.Dialect.HandleSetControl("exposure", 200); // v1 units: 200 x 100 us
+        rig.Dialect.HandleSetControl("gain", 60);
+
+        Assert.Equal(
+            [new ControlChange("exposure", 20_000), new ControlChange("gain", 60)],
+            rig.Backend.Changes);
+        Assert.DoesNotContain(rig.Backend.Changes, c => c.MayRestartStream);
     }
 
     [Fact]

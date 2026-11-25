@@ -364,16 +364,15 @@ public class V2SessionTests
     [Fact]
     public void A_client_that_vanishes_right_after_its_hello_ends_the_session_quietly()
     {
-        // The controls are held back until the client is gone, so the first write after the handshake meets a reset connection.
-        using var gate = new ManualResetEventSlim();
-        using var h = new Harness(new ScriptedBackend { ControlsGate = gate });
+        // The session thread itself drops the client's connection the moment it asks for the controls (right after the handshake),
+        // so its first write meets a reset connection. No sleep, no race between the test thread and the server.
+        var backend = new ScriptedBackend();
+        using var h = new Harness(backend);
         var client = h.Connect();
+        backend.BeforeFirstControlsRead = client.Abort;
         Assert.Equal(MessageType.Hello, client.Read().Type);
-        client.SendJson(MessageType.Hello, ProtocolJson.SerializeClientHello(new ClientHelloMessage { ProtocolVersion = 2, App = "evf-test" }));
 
-        client.Abort();
-        Thread.Sleep(200); // let the reset reach the server
-        gate.Set();
+        client.SendJson(MessageType.Hello, ProtocolJson.SerializeClientHello(new ClientHelloMessage { ProtocolVersion = 2, App = "evf-test" }));
 
         Assert.Equal(ExitCodes.Ok, h.WaitForExit()); // a client that leaves is a normal end, not a crash
     }

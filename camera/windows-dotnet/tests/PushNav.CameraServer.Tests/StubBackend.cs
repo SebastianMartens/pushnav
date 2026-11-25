@@ -62,10 +62,11 @@ internal sealed class StubBackend : ICameraBackend
 
     public void Open(DeviceInfo device) => Device = device;
 
-    public ControlResult SetControl(string id, double value)
+    public ControlResult SetControl(ControlChange change)
     {
         lock (_gate)
         {
+            var (id, value, _) = change;
             var control = Controls.FirstOrDefault(c => c.Id == id);
             if (control == null || !control.TryCoerce(value, out double coerced))
             {
